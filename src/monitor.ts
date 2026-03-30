@@ -81,9 +81,21 @@ export async function checkStaleness() {
         const ageMs = (currentTimestampMs - eventTimestampMs);
 
         if (BigInt(ageMs) > stalenessThresholdMs) {
-          await sendSlackAlert(`🚨 DarkOracle Staleness Alert: DarkOracle last valid PricesUpdated event is ${ageMs}ms old (Event timestamp: ${eventTimestampMs}). Threshold: ${stalenessThresholdMs}ms.`);
+          await sendSlackAlert(
+            `🚨 DarkOracle Staleness Alert:\n` +
+            `• Current Age: ${ageMs}ms\n` +
+            `• Max Age: ${maxAgeMs}ms\n` +
+            `• Safety Margin: ${config.SAFETY_MARGIN * 100}%\n` +
+            `• Effective Threshold: ${stalenessThresholdMs}ms`
+          );
         } else {
-          console.log(`✅ DarkOracle Staleness check passed: Last valid event at timestamp ${eventTimestampMs} (Age: ${ageMs}ms).`);
+          console.log(
+            `✅ DarkOracle Staleness check passed:\n` +
+            `• Current Age: ${ageMs}ms\n` +
+            `• Max Age: ${maxAgeMs}ms\n` +
+            `• Safety Margin: ${config.SAFETY_MARGIN * 100}%\n` +
+            `• Effective Threshold: ${stalenessThresholdMs}ms`
+          );
         }
       }
     }
@@ -111,8 +123,6 @@ export async function checkOraclePrices() {
       args: [config.DARK_ORACLE_ADDRESS]
     }));
 
-    console.log("pythAdapterMaxAgeSeconds", pythAdapterMaxAgeSeconds);
-
     const pythContractAgeLimitSecs = Number(pythAdapterMaxAgeSeconds) * config.SAFETY_MARGIN;
     const currentTimestampSecs = Math.floor(Date.now() / 1000);
 
@@ -129,11 +139,20 @@ export async function checkOraclePrices() {
 
       if (priceAgeSecs > pythContractAgeLimitSecs) {
         await sendSlackAlert(
-          `🚨 Oracle Staleness Alert: Pyth Feed ${feedName} is stale! ` +
-          `Age: ${priceAgeSecs}s. Max allowed: ${pythAdapterMaxAgeSeconds}s (at ${config.SAFETY_MARGIN * 100}% margin).`
+          `🚨 Oracle Staleness Alert: Pyth Feed ${feedName} is stale!\n` +
+          `• Current Age: ${priceAgeSecs}s\n` +
+          `• Max Age: ${pythAdapterMaxAgeSeconds}s\n` +
+          `• Safety Margin: ${config.SAFETY_MARGIN * 100}%\n` +
+          `• Effective Threshold: ${pythContractAgeLimitSecs}s`
         );
       } else {
-        console.log(`✅ Pyth ${feedName} feed is fresh (Age: ${priceAgeSecs}s)`);
+        console.log(
+          `✅ Pyth ${feedName} feed is fresh:\n` +
+          `• Current Age: ${priceAgeSecs}s\n` +
+          `• Max Age: ${pythAdapterMaxAgeSeconds}s\n` +
+          `• Safety Margin: ${config.SAFETY_MARGIN * 100}%\n` +
+          `• Effective Threshold: ${pythContractAgeLimitSecs}s`
+        );
       }
     }
 

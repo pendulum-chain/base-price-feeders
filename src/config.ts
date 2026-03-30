@@ -9,6 +9,8 @@ export const config = {
   DARK_ORACLE_ADDRESS: (process.env.DARK_ORACLE_ADDRESS || "") as `0x${string}`,
   PYTH_ADAPTER_ADDRESS: (process.env.PYTH_ADAPTER_ADDRESS || "") as `0x${string}`,
   FEEDER_ACCOUNT_ADDRESS: (process.env.FEEDER_ACCOUNT_ADDRESS || "0x707e17f496a4a0cc6e0eda73480809b2385a7213") as `0x${string}`,
+  SLACK_TOKEN: process.env.SLACK_TOKEN,
+  SLACK_CHANNEL_ID: process.env.SLACK_CHANNEL_ID,
 
   // Monitoring thresholds
   MIN_ETH_BALANCE_THRESHOLD: Object.is(parseFloat(process.env.MIN_ETH_BALANCE_THRESHOLD || ""), NaN)
