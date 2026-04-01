@@ -1,0 +1,36 @@
+[package]
+name = "dia-batching-server"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+actix-web = "4.8.0"
+actix-cors = "0.7.0"
+arc-swap = "1.7.1"
+async-trait = "0.1.80"
+
+clap = {  version = "3.2.25", features = ["derive", "env"] }
+dotenv = "0.15.0"
+
+chrono = {version = "0.4.38", features = ["serde"] }
+
+graphql_client = { version = "0.14.0", features = ["reqwest"]}
+
+log = "0.4.14"
+
+pretty_env_logger = "0.5.0"
+
+reqwest = { version = "0.12.5", features = ["json"] }
+
+serde = { version = "1.0.139", features = ["derive"] }
+serde_json = "1.0.118"
+smol_str = { version = "0.1.18", features = ["serde"] }
+
+tokio = { version = "1.38.0", features = ["full"] }
+
+rust_decimal = "1.17.0"
+rust_decimal_macros = "1.17"
+futures = "0.3.30"
+hex = "0.4"
+
+alloy = { version = "0.1", features = ["full"] }

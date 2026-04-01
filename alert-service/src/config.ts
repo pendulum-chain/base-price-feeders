@@ -2,7 +2,8 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const DEFAULT_SAFETY_MARGIN = 0.3;
+const DEFAULT_SAFETY_MARGIN = "0.8";
+const MIN_ETH_BALANCE_THRESHOLD_DEFAULT = "0.25";
 
 export const config = {
   ALCHEMY_RPC_URL: process.env.ALCHEMY_RPC_URL || "",
@@ -14,12 +15,12 @@ export const config = {
 
   // Monitoring thresholds
   MIN_ETH_BALANCE_THRESHOLD: Object.is(parseFloat(process.env.MIN_ETH_BALANCE_THRESHOLD || ""), NaN)
-    ? 0.05
-    : parseFloat(process.env.MIN_ETH_BALANCE_THRESHOLD || "0.05"),
+    ? parseFloat(MIN_ETH_BALANCE_THRESHOLD_DEFAULT)
+    : parseFloat(process.env.MIN_ETH_BALANCE_THRESHOLD || MIN_ETH_BALANCE_THRESHOLD_DEFAULT),
 
   SAFETY_MARGIN: Object.is(parseFloat(process.env.SAFETY_MARGIN || ""), NaN)
-    ? DEFAULT_SAFETY_MARGIN
-    : parseFloat(process.env.SAFETY_MARGIN || "0.3"),
+    ? parseFloat(DEFAULT_SAFETY_MARGIN)
+    : parseFloat(process.env.SAFETY_MARGIN || DEFAULT_SAFETY_MARGIN),
 
   PYTH_FEEDS: {
     eurcUsd: "0x76fa85158bf14ede77087fe3ae472f66213f6ea2f5b411cb2de472794990fa5c" as `0x${string}`,
