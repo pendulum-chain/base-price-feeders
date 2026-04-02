@@ -104,7 +104,7 @@ pub(crate) async fn update_prices<T>(
 
 	let dark_oracle_prices: Option<PriceData> = match dark_oracle_result {
 		Ok((tx_hash, price_data)) => {
-			info!("DarkOracle tx submitted: USDC={}, EURC={}", price_data.usdc, price_data.eurc);
+			info!("DarkOracle tx submitted: USDC={}, EURC={}, BRLA={}", price_data.usdc, price_data.eurc, price_data.brla);
 			send_tx(update_tx, TxKind::DarkOracle, tx_hash);
 			Some(price_data)
 		}
@@ -116,7 +116,7 @@ pub(crate) async fn update_prices<T>(
 
 	let pyth_prices: Option<PriceData> = match pyth_result {
 		Ok((tx_hash_opt, price_data)) => {
-			info!("Pyth prices fetched: USDC={}, EURC={}", price_data.usdc, price_data.eurc);
+			info!("Pyth prices fetched: USDC={}, EURC={}, BRLA={}", price_data.usdc, price_data.eurc, price_data.brla);
 			if let Some(tx_hash) = tx_hash_opt {
 				send_tx(update_tx, TxKind::Pyth, tx_hash);
 			}

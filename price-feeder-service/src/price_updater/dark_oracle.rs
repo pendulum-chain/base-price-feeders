@@ -94,9 +94,11 @@ impl DarkOracleUpdater {
 
 		let usdc_raw = symbol_to_price.get("USDC").ok_or("USDC price not found")?;
 		let eurc_raw = symbol_to_price.get("EURC").ok_or("EURC price not found")?;
+		let brla_raw = symbol_to_price.get("BRL").ok_or("BRL price not found")?;
 		let price_data = PriceData {
 			usdc: *usdc_raw as f64 / 10f64.powi(18),
 			eurc: *eurc_raw as f64 / 10f64.powi(18),
+			brla: *brla_raw as f64 / 10f64.powi(18),
 		};
 
 		Ok((tx_hash, price_data))

@@ -14,6 +14,8 @@ const USDC_PRICE_FEED_ID: &str =
 	"eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
 const EURC_PRICE_FEED_ID: &str =
 	"76fa85158bf14ede77087fe3ae472f66213f6ea2f5b411cb2de472794990fa5c";
+const BRLA_PRICE_FEED_ID: &str =
+	"d2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906";
 
 #[derive(Debug, Deserialize)]
 pub struct HermesPrice {
@@ -81,8 +83,8 @@ impl PythPriceUpdater {
 		};
 
 		let api_url = format!(
-			"https://hermes.pyth.network/v2/updates/price/latest?ids%5B%5D={}&ids%5B%5D={}",
-			USDC_PRICE_FEED_ID, EURC_PRICE_FEED_ID
+			"https://hermes.pyth.network/v2/updates/price/latest?ids%5B%5D={}&ids%5B%5D={}&ids%5B%5D={}",
+			USDC_PRICE_FEED_ID, EURC_PRICE_FEED_ID, BRLA_PRICE_FEED_ID
 		);
 
 		debug!("Fetching Pyth prices from Hermes API...");
@@ -95,6 +97,7 @@ impl PythPriceUpdater {
 
 		let mut usdc_price = None;
 		let mut eurc_price = None;
+		let mut brla_price = None;
 		for entry in &data.parsed {
 			let price_val = entry
 				.price
@@ -106,12 +109,17 @@ impl PythPriceUpdater {
 				usdc_price = Some(actual_price);
 			} else if entry.id == EURC_PRICE_FEED_ID {
 				eurc_price = Some(actual_price);
+			} else if entry.id == BRLA_PRICE_FEED_ID {
+				brla_price = Some(actual_price);
+				// price for BRLA is expected to be in USD/BRL format, so we need to invert it to get BRL/USD
+				brla_price = Some(1.0 / brla_price.unwrap());
 			}
 		}
 		let usdc = usdc_price.ok_or("USDC price not found")?;
 		let eurc = eurc_price.ok_or("EURC price not found")?;
+		let brla = brla_price.ok_or("BRLA price not found")?;
 
-		let price_data = PriceData { usdc, eurc };
+		let price_data = PriceData { usdc, eurc, brla };
 
 		let tx_hash = if should_update_contract {
 			let bytes_data: Vec<Bytes> = data.binary.data

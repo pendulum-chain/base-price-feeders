@@ -92,4 +92,5 @@ impl ChainClient {
 pub struct PriceData {
 	pub usdc: f64,
 	pub eurc: f64,
+	pub brla: f64,
 }
