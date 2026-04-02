@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	});
 
 	let port = 10000;
-	println!("Running dia-batching-server on port {port}... (Press CTRL+C to quit)");
+	println!("Running price-feeder-service on port {port}... (Press CTRL+C to quit)");
 	HttpServer::new(move || {
 		App::new().app_data(data.clone()).service(currencies_post).service(health)
 	})
