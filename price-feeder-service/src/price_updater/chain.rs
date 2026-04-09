@@ -83,7 +83,7 @@ impl ChainClient {
 
 	pub async fn estimate_priority_fee(&self) -> Result<u128, Box<dyn Error + Send + Sync + 'static>> {
 		let fees = alloy::providers::Provider::estimate_eip1559_fees(&*self.provider, None).await?;
-		let priority_fee = fees.max_priority_fee_per_gas * (3u128 / 2u128);
+		let priority_fee = fees.max_priority_fee_per_gas;
 		Ok(priority_fee)
 	}
 }

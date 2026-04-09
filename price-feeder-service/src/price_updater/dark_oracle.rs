@@ -85,7 +85,7 @@ impl DarkOracleUpdater {
 		let call_builder = oracle
 			.updatePriceFeeds(prices, timestamp)
 			.gas(1_000_000)
-			.max_priority_fee_per_gas(priority_fee * 2)
+			.max_priority_fee_per_gas(priority_fee * 5)
 			.nonce(nonce);
 
 		let pending_tx = call_builder.send().await?;
