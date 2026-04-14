@@ -166,7 +166,7 @@ impl PythPriceUpdater {
 			.updatePriceFeeds(bytes_data)
 			.value(update_fee)
 			.gas(1_000_000)
-			.max_priority_fee_per_gas(priority_fee * 5)
+			.max_priority_fee_per_gas(priority_fee * 7)
 			.nonce(nonce);
 
 		let pending_tx = call_builder.send().await?;
