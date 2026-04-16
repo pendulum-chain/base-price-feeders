@@ -98,7 +98,7 @@ pub(crate) async fn update_prices<T>(
 
 
 	let (dark_oracle_result, pyth_result) = tokio::join!(
-		dark_oracle_updater.update_prices(&currencies, dark_oracle_client),
+		dark_oracle_updater.update_prices(&currencies, dark_oracle_client.clone()),
 		pyth_updater.run_update(pyth_client),
 	);
 
@@ -110,7 +110,23 @@ pub(crate) async fn update_prices<T>(
 		}
 		Err(e) => {
 			error!("Failed to submit DarkOracle tx: {:?}", e);
-			None
+			if let Ok((_, ref pyth_data)) = pyth_result {
+				info!("Retrying DarkOracle update using Pyth prices as fallback");
+				let fallback_currencies = pyth_price_data_to_currencies(pyth_data);
+				match dark_oracle_updater.update_prices(&fallback_currencies, dark_oracle_client).await {
+					Ok((tx_hash, price_data)) => {
+						info!("DarkOracle tx submitted (fallback Pyth prices): USDC={}, EURC={}, BRLA={}", price_data.usdc, price_data.eurc, price_data.brla);
+						send_tx(update_tx, TxKind::DarkOracle, tx_hash);
+						Some(price_data)
+					}
+					Err(e2) => {
+						error!("Failed to submit DarkOracle tx with fallback Pyth prices: {:?}", e2);
+						None
+					}
+				}
+			} else {
+				None
+			}
 		}
 	};
 
@@ -170,6 +186,28 @@ fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 			}
 		}
 	}
+}
+
+fn pyth_price_data_to_currencies(data: &PriceData) -> Vec<crate::types::CoinInfo> {
+	let mut currencies = Vec::new();
+	let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
+	
+	let mut add_coin = |symbol: &str, price: f64| {
+		currencies.push(crate::types::CoinInfo {
+			symbol: symbol.into(),
+			name: symbol.into(),
+			blockchain: "unknown".into(),
+			supply: 0,
+			last_update_timestamp: 0,
+			price: (price * scale) as u128,
+		});
+	};
+
+	add_coin("USDC", data.usdc);
+	add_coin("EURC", data.eurc);
+	add_coin("BRL", data.brla); // mapped from BRLA to BRL for dark_oracle updater
+
+	currencies
 }
 
 #[cfg(test)]
