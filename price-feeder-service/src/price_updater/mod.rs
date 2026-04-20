@@ -43,46 +43,53 @@ where
 		let start = tokio::time::Instant::now();
 		
 		let assets_refs: Vec<&AssetSpecifier> = supported_currencies.iter().collect();
-		let quotations = api.get_quotations(assets_refs).await;
+		let storage_pyth = storage.clone();
 		
-		let mut currencies = vec![];
-		for q in quotations {
-			match convert_to_coin_info(q.clone()) {
-				Ok(ci) => {
-					currencies.push(ci.clone());
-					storage.update_timeframe(ci);
-				},
-				Err(e) => error!("Error converting to CoinInfo: {:#?}", e),
+		let quotations_future = async {
+			let quotations = api.get_quotations(assets_refs).await;
+			let mut currencies = vec![];
+			for q in quotations {
+				match convert_to_coin_info(q.clone()) {
+					Ok(ci) => {
+						currencies.push(ci.clone());
+						storage.update_timeframe(ci);
+					},
+					Err(e) => error!("Error converting to CoinInfo: {:#?}", e),
+				}
 			}
-		}
-		storage.replace_currencies_by_symbols(currencies);
+			storage.replace_currencies_by_symbols(currencies);
+		};
 
 		// Fetch Pyth prices. Purely for storage update as coinbase/coingecko final backups.
-		match pyth::fetch_pyth_prices().await {
-			Ok((_data, price_data)) => {
-				info!("Pyth prices fetched in fetch loop: USDC={}, EURC={}, BRLA={}", price_data.usdc, price_data.eurc, price_data.brla);
-				let time = chrono::Utc::now().timestamp().unsigned_abs();
-				
-				let update_pyth = |symbol: &str, price: f64| {
-					let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
-					storage.update_timeframe(CoinInfo {
-						symbol: symbol.into(),
-						name: symbol.into(),
-						blockchain: "unknown".into(),
-						supply: 0,
-						last_update_timestamp: time,
-						price: (price * scale) as u128,
-						provider: Aggregator::Pyth,
-					});
-				};
-				update_pyth("USDC", price_data.usdc);
-				update_pyth("EURC", price_data.eurc);
-				update_pyth("BRL", price_data.brla);
+		let pyth_future = async {
+			match pyth::fetch_pyth_prices().await {
+				Ok((_data, price_data)) => {
+					info!("Pyth prices fetched in fetch loop: USDC={}, EURC={}, BRLA={}", price_data.usdc, price_data.eurc, price_data.brla);
+					let time = chrono::Utc::now().timestamp().unsigned_abs();
+					
+					let update_pyth = |symbol: &str, price: f64| {
+						let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
+						storage_pyth.update_timeframe(CoinInfo {
+							symbol: symbol.into(),
+							name: symbol.into(),
+							blockchain: "unknown".into(),
+							supply: 0,
+							last_update_timestamp: time,
+							price: (price * scale) as u128,
+							provider: Aggregator::Pyth,
+						});
+					};
+					update_pyth("USDC", price_data.usdc);
+					update_pyth("EURC", price_data.eurc);
+					update_pyth("BRL", price_data.brla);
+				}
+				Err(e) => {
+					error!("Failed to fetch Pyth prices in fetch loop: {:?}", e);
+				}
 			}
-			Err(e) => {
-				error!("Failed to fetch Pyth prices in fetch loop: {:?}", e);
-			}
-		}
+		};
+
+		tokio::join!(quotations_future, pyth_future);
 
 		let elapsed = start.elapsed();
 		if elapsed < update_interval {
@@ -128,13 +135,12 @@ pub async fn run_feed_loop(
 		for asset in &supported_currencies {
 			// Hierarchy: coinbase -> coingecko -> pyth
 			let mut selected_tf = storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coinbase);
-			info!("Checking price for {} on Coinbase: {:?}", asset.symbol, selected_tf);
 			if selected_tf.is_none() {
 				selected_tf = storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coingecko);
-				info!("Checking price for {} on CoinGecko: {:?}", asset.symbol, selected_tf);
+				warn!("Checking price for {} on CoinGecko: {:?}", asset.symbol, selected_tf);
 			}
 			if selected_tf.is_none() {
-				info!("Checking price for {} on Pyth: {:?}", asset.symbol, selected_tf);
+				warn!("Checking price for {} on Pyth: {:?}", asset.symbol, selected_tf);
 				// Pyth uses "unknown" as blockchain in our updater
 				selected_tf = storage.get_timeframe(&asset.symbol, "unknown", Aggregator::Pyth);
 			}

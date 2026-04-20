@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		let _ = price_updater::run_fetch_loop(
 			fetch_storage,
 			fetch_currencies,
-			std::time::Duration::from_secs(update_interval_seconds),
+			std::time::Duration::from_secs(1),
 			price_api,
 			fetch_update_tx,
 		).await;

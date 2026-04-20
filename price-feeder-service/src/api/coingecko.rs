@@ -32,8 +32,6 @@ impl CoingeckoPriceApi {
 	) -> Result<Vec<Quotation>, CoingeckoError> {
 		// Map used for the reverse lookup of the CoinGecko ID to the asset
 		let mut id_to_asset_map: HashMap<String, AssetSpecifier> = HashMap::new();
-		// log all
-		info!("Getting CoinGecko prices for assets: {:?}", assets);
 		let coingecko_ids = assets
 			.clone()
 			.into_iter()
@@ -50,9 +48,6 @@ impl CoingeckoPriceApi {
 			})
 			.collect::<Vec<_>>();
 
-		// mapped id's
-		info!("Mapped CoinGecko IDs for assets: {:?}", id_to_asset_map);
-
 		if coingecko_ids.is_empty() {
 			return Ok(vec![]);
 		}
@@ -61,7 +56,6 @@ impl CoingeckoPriceApi {
 			self.client.price(&coingecko_ids, false, true, false, true).await.map_err(|e| {
 				CoingeckoError(format!("Couldn't query CoinGecko prices {}", e.to_string()))
 			})?;
-		info!("Received CoinGecko price data for IDs: {:?}", id_to_price_map);
 		let quotations = id_to_price_map
 			.into_iter()
 			.filter_map(|(id, price)| {
@@ -94,7 +88,7 @@ impl CoingeckoPriceApi {
 		let blockchain = asset.blockchain.to_uppercase();
 		let symbol = asset.symbol.to_uppercase();
 		match (blockchain.as_str(), symbol.as_str()) {
-			("BASE", "EURC") => Some("euro-coin".to_string()),
+			//("BASE", "EURC") => Some("euro-coin".to_string()),
 			("BASE", "USDC") => Some("usd-coin".to_string()),
 			("BASE", "BRLA") => Some("brla-digital-brla".to_string()),
 			("BASE", "BRL") => Some("brla-digital-brla".to_string()),
@@ -137,7 +131,6 @@ impl CoingeckoClient {
 			format!("{host}/{ep}", host = self.host.as_str(), ep = endpoint).as_str(),
 		)
 		.expect("Invalid URL");
-		info!("Making request to CoinGecko API with URL: {}", url);
 
 		let mut request = client.get(url).header("accept", "application/json");
 

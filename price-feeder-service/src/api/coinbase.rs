@@ -71,8 +71,8 @@ impl CoinbasePriceApi {
 	fn convert_to_pair(asset: &AssetSpecifier) -> Option<String> {
 		let symbol = asset.symbol.to_uppercase();
 		match symbol.as_str() {
-			"EURC" => Some("EURC-USD".to_string()),
-			"BRL" => Some("BRL-USD".to_string()),
+			//"EURC" => Some("EURC-USD".to_string()),
+			//"BRL" => Some("BRL-USD".to_string()),
 			"USDC" => Some("USDC-USD".to_string()),
 			_ => None,
 		}
