@@ -8,8 +8,8 @@ use std::convert::TryFrom;
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::types::CoinInfo;
 use super::chain::{ChainClient, PriceData};
+use crate::types::CoinInfo;
 
 sol! {
 	#[sol(rpc)]
@@ -36,7 +36,7 @@ impl DarkOracleUpdater {
 		client: Arc<ChainClient>,
 	) -> Result<(B256, PriceData), Box<dyn Error + Send + Sync + 'static>> {
 		info!("Starting DarkOracle contract price update...");
-		
+
 		let oracle = DarkOracle::new(self.contract_address, &*client.provider);
 
 		let symbol_to_price: HashMap<&str, u128> =
@@ -74,9 +74,7 @@ impl DarkOracleUpdater {
 		}
 
 		let timestamp = u64::try_from(
-			std::time::SystemTime::now()
-				.duration_since(std::time::UNIX_EPOCH)?
-				.as_millis(),
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis(),
 		)?;
 
 		info!("Updating DarkOracle contract prices: {:?}", prices);

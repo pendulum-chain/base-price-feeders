@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::price_updater::{
 	PriceDivergenceAlert, UpdateTx,
-	alerts, tx_processor,
+	alerts, tx_processor, chain::ChainClient, PythPriceUpdater, DarkOracleUpdater,
 };
 
 mod api;
@@ -70,20 +70,45 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		tx_processor::run_tx_processor(update_rx).await;
 	});
 
+	let pyth_updater = PythPriceUpdater::new(std::time::Duration::from_secs(pyth_update_interval_seconds))?;
+	let dark_oracle_updater = DarkOracleUpdater::new()?;
+	let nonce_manager = ChainClient::create_nonce_manager().await?;
+	let dark_oracle_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
+	let pyth_client = Arc::new(ChainClient::new(nonce_manager).await?);
+	
+	let fetch_storage = storage.clone();
+	let fetch_currencies = supported_currencies.clone();
+	let fetch_update_tx = update_tx.clone();
+
 	tokio::spawn(async move {
-		info!("Starting price updater");
+		info!("Starting fetch loop");
 		let price_api = PriceApiImpl::new();
-		let _ = price_updater::run_update_prices_loop(
-			storage,
-			supported_currencies,
+		let _ = price_updater::run_fetch_loop(
+			fetch_storage,
+			fetch_currencies,
 			std::time::Duration::from_secs(update_interval_seconds),
-			std::time::Duration::from_secs(pyth_update_interval_seconds),
-			price_divergence_threshold_bp,
 			price_api,
+			fetch_update_tx,
+		).await;
+	});
+
+	let feed_storage = storage.clone();
+	let feed_currencies = supported_currencies.clone();
+
+	tokio::spawn(async move {
+		info!("Starting feed loop");
+		let _ = price_updater::run_feed_loop(
+			feed_storage,
+			feed_currencies,
+			std::time::Duration::from_secs(update_interval_seconds),
+			price_divergence_threshold_bp,
+			dark_oracle_updater,
+			dark_oracle_client,
 			divergence_tx,
 			update_tx,
-		)
-		.await;
+			pyth_updater,
+			pyth_client,
+		).await;
 	});
 
 	let port = 10000;

@@ -4,7 +4,6 @@ use crate::AssetSpecifier;
 use async_trait::async_trait;
 use std::string::ToString;
 
-
 #[async_trait]
 pub trait AssetCompatibility: Send + Sync {
 	fn supports(&self, asset: &AssetSpecifier) -> bool;
@@ -18,10 +17,7 @@ pub struct CustomPriceApi {
 
 impl CustomPriceApi {
 	pub fn new() -> Self {
-		CustomPriceApi {
-			apis: vec![
-			],
-		}
+		CustomPriceApi { apis: vec![] }
 	}
 
 	pub async fn get_price(&self, asset: &AssetSpecifier) -> Result<Quotation, CustomError> {

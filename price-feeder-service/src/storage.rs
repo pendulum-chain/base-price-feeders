@@ -1,37 +1,51 @@
-use crate::types::CoinInfo;
+use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
-use arc_swap::ArcSwap;
-use smol_str::SmolStr;
-use std::collections::HashMap;
-use std::sync::Arc;
+use rust_decimal::Decimal;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Default)]
+#[derive(Default, Clone)]
 pub struct CoinInfoStorage {
-	currencies_by_blockchain_and_symbol: ArcSwap<HashMap<(SmolStr, SmolStr), CoinInfo>>,
+	pub currencies: Arc<RwLock<HashMap<String, CoinInfo>>>,
+	pub timeframes: Arc<RwLock<HashMap<String, CoinInfo>>>, // Key: token_blockchain_provider
 }
 
 impl CoinInfoStorage {
-	pub fn get_currencies_by_blockchains_and_symbols(
-		&self,
-		blockchain_and_symbols: Vec<AssetSpecifier>,
-	) -> Vec<CoinInfo> {
-		let reference = self.currencies_by_blockchain_and_symbol.load();
-		blockchain_and_symbols
-			.iter()
-			.filter_map(|AssetSpecifier { blockchain, symbol }| {
-				reference.get(&(blockchain.into(), symbol.into()))
-			})
-			.cloned()
-			.collect()
+	pub fn get_currencies(&self) -> Vec<CoinInfo> {
+		self.currencies.read().unwrap().values().cloned().collect()
 	}
 
-	#[allow(dead_code)]
-	pub fn replace_currencies_by_symbols(&self, currencies: Vec<CoinInfo>) {
-		let map_to_replace_with = currencies
-			.into_iter()
-			.map(|x| ((x.blockchain.clone(), x.symbol.clone()), x))
-			.collect();
+	pub fn get_currency(&self, symbol: &str) -> Option<CoinInfo> {
+		self.currencies.read().unwrap().get(symbol).cloned()
+	}
 
-		self.currencies_by_blockchain_and_symbol.store(Arc::new(map_to_replace_with));
+	pub fn get_currencies_by_blockchains_and_symbols(
+		&self,
+		specs: Vec<AssetSpecifier>,
+	) -> Vec<CoinInfo> {
+		let lock = self.currencies.read().unwrap();
+		specs.into_iter().filter_map(|s| lock.get(&s.symbol).cloned()).collect()
+	}
+
+	pub fn replace_currencies_by_symbols(&self, new_currencies: Vec<CoinInfo>) {
+		let mut lock = self.currencies.write().unwrap();
+		for currency in new_currencies {
+			lock.insert(currency.symbol.to_string(), currency);
+		}
+	}
+
+	pub fn update_timeframe(&self, coin_info: CoinInfo) {
+		let key = format!("{}_{}_{}", coin_info.symbol, coin_info.blockchain, coin_info.provider);
+		self.timeframes.write().unwrap().insert(key, coin_info);
+	}
+
+	pub fn get_timeframe(
+		&self,
+		token: &str,
+		blockchain: &str,
+		provider: Aggregator,
+	) -> Option<CoinInfo> {
+		let key = format!("{}_{}_{}", token, blockchain, provider);
+		self.timeframes.read().unwrap().get(&key).cloned()
 	}
 }

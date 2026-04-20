@@ -1,32 +1,38 @@
 use crate::api::coinbase::CoinbasePriceApi;
+use crate::api::coingecko::CoingeckoPriceApi;
 use crate::api::custom::CustomPriceApi;
-use crate::api::error::{CoinbaseError, CustomError};
+use crate::api::error::{CoinbaseError, CoingeckoError, CustomError};
+use crate::args::CoingeckoConfig;
 use crate::types::Quotation;
 use crate::AssetSpecifier;
 use async_trait::async_trait;
 
-mod coinbase;
-mod custom;
-mod error;
+pub mod coinbase;
+pub mod coingecko;
+pub mod custom;
+pub mod error;
 
 #[async_trait]
 pub trait PriceApi {
-	/// A method to get quotations for a list of assets.
-	/// The method will return a list of quotations for the assets that are supported by the API.
-	/// If an asset is not supported, the method will log an error and continue.
-	/// The method will return an empty list if no quotations are available.
 	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> Vec<Quotation>;
 }
 
 pub struct PriceApiImpl {
 	coinbase_price_api: CoinbasePriceApi,
+	coingecko_price_api: CoingeckoPriceApi,
 	custom_price_api: CustomPriceApi,
 }
 
 impl PriceApiImpl {
 	pub fn new() -> Self {
+		let config = CoingeckoConfig {
+			cg_host_url: std::env::var("CG_HOST_URL")
+				.unwrap_or_else(|_| "https://api.coingecko.com".to_string()),
+			cg_api_key: std::env::var("CG_API_KEY").ok(),
+		};
 		Self {
 			coinbase_price_api: CoinbasePriceApi::new(),
+			coingecko_price_api: CoingeckoPriceApi::new_from_config(config),
 			custom_price_api: CustomPriceApi::new(),
 		}
 	}
@@ -37,8 +43,6 @@ impl PriceApi for PriceApiImpl {
 	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> Vec<Quotation> {
 		let mut quotations = Vec::new();
 
-		// Split all assets into custom vs other assets. This is important because it could happen that
-		// a custom asset is also supported by another API Impl. We want to always select the custom implementation.
 		let (custom_assets, assets): (Vec<&AssetSpecifier>, Vec<&AssetSpecifier>) =
 			assets.into_iter().partition(|asset| self.custom_price_api.is_supported(asset));
 
@@ -50,30 +54,43 @@ impl PriceApi for PriceApiImpl {
 			log::error!("Error getting custom quotation: {}", error);
 		}
 
-		let coinbase_assets = assets
-			.into_iter()
-			.filter(|asset| CoinbasePriceApi::is_supported(asset))
-			.collect::<Vec<_>>();
+		let (coinbase_assets, assets): (Vec<&AssetSpecifier>, Vec<&AssetSpecifier>) =
+			assets.into_iter().partition(|asset| CoinbasePriceApi::is_supported(asset));
 
-		let coinbase_assets: Vec<_> = coinbase_assets.clone().into_iter().filter(|asset| CoinbasePriceApi::is_supported(asset)).collect();
 		let coinbase_quotes = self.get_coinbase_quotations(coinbase_assets).await;
 		match coinbase_quotes {
 			Ok(coinbase_quotes) => quotations.extend(coinbase_quotes),
 			Err(e) => log::error!("Error getting Coinbase quotations: {}", e),
 		}
 
+		let coingecko_assets: Vec<_> = assets
+			.into_iter()
+			.filter(|asset| CoingeckoPriceApi::is_supported(asset))
+			.collect();
+		let coingecko_quotes = self.get_coingecko_quotations(coingecko_assets).await;
+		match coingecko_quotes {
+			Ok(coingecko_quotes) => quotations.extend(coingecko_quotes),
+			Err(e) => log::error!("Error getting CoinGecko quotations: {:?}", e),
+		}
 
 		quotations
 	}
 }
 
 impl PriceApiImpl {
-
 	async fn get_coinbase_quotations(
 		&self,
 		assets: Vec<&AssetSpecifier>,
 	) -> Result<Vec<Quotation>, CoinbaseError> {
 		let quotations = self.coinbase_price_api.get_prices(assets).await?;
+		Ok(quotations)
+	}
+
+	async fn get_coingecko_quotations(
+		&self,
+		assets: Vec<&AssetSpecifier>,
+	) -> Result<Vec<Quotation>, CoingeckoError> {
+		let quotations = self.coingecko_price_api.get_prices(assets).await?;
 		Ok(quotations)
 	}
 

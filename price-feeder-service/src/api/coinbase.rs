@@ -23,21 +23,20 @@ impl CoinbasePriceApi {
 		let mut futures = Vec::new();
 
 		for asset in assets {
-			let pair = Self::convert_to_pair(asset).ok_or_else(|| {
-				CoinbaseError(format!("Unsupported asset: {:?}", asset))
-			})?;
+			let pair = Self::convert_to_pair(asset)
+				.ok_or_else(|| CoinbaseError(format!("Unsupported asset: {:?}", asset)))?;
 			let future = self.client.get_price(pair);
 			futures.push((asset.clone(), future));
 		}
 
-		let results = futures::future::join_all(
-			futures.into_iter().map(|(asset, fut)| async move {
+		let results =
+			futures::future::join_all(futures.into_iter().map(|(asset, fut)| async move {
 				match fut.await {
 					Ok(price_data) => Ok((asset, price_data)),
 					Err(e) => Err((asset, e)),
 				}
-			})
-		).await;
+			}))
+			.await;
 
 		let mut quotations = Vec::new();
 		for result in results {
@@ -48,14 +47,15 @@ impl CoinbasePriceApi {
 						name: asset.symbol.clone(),
 						blockchain: Some(asset.blockchain.clone()),
 						price: price_data.amount,
-						supply: Decimal::ZERO, 
+						supply: Decimal::ZERO,
 						time: chrono::Utc::now().timestamp().unsigned_abs(),
+						provider: "coinbase".to_string(),
 					};
 					quotations.push(quotation);
-				}
+				},
 				Err((asset, e)) => {
 					log::error!("Error getting Coinbase price for {:?}: {}", asset, e);
-				}
+				},
 			}
 		}
 
@@ -99,27 +99,28 @@ pub struct CoinbaseClient {
 
 impl CoinbaseClient {
 	pub fn new() -> Self {
-		CoinbaseClient {
-			host: "https://api.coinbase.com".to_string(),
-		}
+		CoinbaseClient { host: "https://api.coinbase.com".to_string() }
 	}
 
 	async fn get_price(&self, pair: String) -> Result<CoinbasePriceData, CoinbaseError> {
 		let client = reqwest::Client::new();
 		let url = format!("{}/v2/prices/{}/spot", self.host, pair);
 
-		let response = client.get(&url).send().await.map_err(|e| {
-			CoinbaseError(format!("Failed to send request: {}", e))
-		})?;
+		let response = client
+			.get(&url)
+			.send()
+			.await
+			.map_err(|e| CoinbaseError(format!("Failed to send request: {}", e)))?;
 
 		if !response.status().is_success() {
 			let result = response.text().await.unwrap_or("Unknown".to_string());
 			return Err(CoinbaseError(format!("Coinbase API error: {}", result)));
 		}
 
-		let price_response: CoinbasePriceResponse = response.json().await.map_err(|e| {
-			CoinbaseError(format!("Could not decode Coinbase response: {}", e))
-		})?;
+		let price_response: CoinbasePriceResponse = response
+			.json()
+			.await
+			.map_err(|e| CoinbaseError(format!("Could not decode Coinbase response: {}", e)))?;
 
 		Ok(price_response.data)
 	}
@@ -132,7 +133,8 @@ mod tests {
 	#[tokio::test]
 	async fn test_fetching_single_price() {
 		let client = CoinbaseClient::new();
-		let price_data = client.get_price("USDC-USD".to_string()).await.expect("Should return a price");
+		let price_data =
+			client.get_price("USDC-USD".to_string()).await.expect("Should return a price");
 		assert_eq!(price_data.base, "USDC");
 		assert_eq!(price_data.currency, "USD");
 		assert!(price_data.amount > Decimal::ZERO);
@@ -142,9 +144,12 @@ mod tests {
 	async fn test_api_returns_prices() {
 		let price_api = CoinbasePriceApi::new();
 
-		let eurc_asset = AssetSpecifier { blockchain: "Base".to_string(), symbol: "EURC".to_string() };
-		let brl_asset = AssetSpecifier { blockchain: "Base".to_string(), symbol: "BRL".to_string() };
-		let usdc_asset = AssetSpecifier { blockchain: "Base".to_string(), symbol: "USDC".to_string() };
+		let eurc_asset =
+			AssetSpecifier { blockchain: "Base".to_string(), symbol: "EURC".to_string() };
+		let brl_asset =
+			AssetSpecifier { blockchain: "Base".to_string(), symbol: "BRL".to_string() };
+		let usdc_asset =
+			AssetSpecifier { blockchain: "Base".to_string(), symbol: "USDC".to_string() };
 
 		let assets = vec![&eurc_asset, &brl_asset, &usdc_asset];
 
