@@ -59,7 +59,7 @@ pub struct Quotation {
 	#[serde(rename(deserialize = "Time"))]
 	pub time: u64,
 	#[serde(default)]
-	pub provider: String,
+	pub provider: Aggregator,
 }
 
 /// This struct is used to store information about a coin.

@@ -24,12 +24,7 @@ pub struct PriceApiImpl {
 }
 
 impl PriceApiImpl {
-	pub fn new() -> Self {
-		let config = CoingeckoConfig {
-			cg_host_url: std::env::var("CG_HOST_URL")
-				.unwrap_or_else(|_| "https://api.coingecko.com".to_string()),
-			cg_api_key: std::env::var("CG_API_KEY").ok(),
-		};
+	pub fn new(config: CoingeckoConfig) -> Self {
 		Self {
 			coinbase_price_api: CoinbasePriceApi::new(),
 			coingecko_price_api: CoingeckoPriceApi::new_from_config(config),
@@ -43,19 +38,19 @@ impl PriceApi for PriceApiImpl {
 	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> Vec<Quotation> {
 		let mut quotations = Vec::new();
 
-		let (custom_assets, assets): (Vec<&AssetSpecifier>, Vec<&AssetSpecifier>) =
-			assets.into_iter().partition(|asset| self.custom_price_api.is_supported(asset));
+		let custom_assets: Vec<&AssetSpecifier> =
+			assets.iter().copied().filter(|asset| self.custom_price_api.is_supported(asset)).collect();
 
 		let (custom_quotes, custom_quote_errors) =
-			self.get_custom_quotations(custom_assets.clone()).await;
+			self.get_custom_quotations(custom_assets).await;
 
 		quotations.extend(custom_quotes);
 		for error in custom_quote_errors {
 			log::error!("Error getting custom quotation: {}", error);
 		}
 
-		let (coinbase_assets, assets): (Vec<&AssetSpecifier>, Vec<&AssetSpecifier>) =
-			assets.into_iter().partition(|asset| CoinbasePriceApi::is_supported(asset));
+		let coinbase_assets: Vec<&AssetSpecifier> =
+			assets.iter().copied().filter(|asset| CoinbasePriceApi::is_supported(asset)).collect();
 
 		let coinbase_quotes = self.get_coinbase_quotations(coinbase_assets).await;
 		match coinbase_quotes {

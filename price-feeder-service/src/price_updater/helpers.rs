@@ -45,7 +45,7 @@ pub fn convert_to_coin_info(value: Quotation) -> Result<CoinInfo, Box<dyn Error 
 		price,
 		last_update_timestamp: time,
 		supply,
-		provider: provider.as_str().into(),
+		provider,
 	};
 
 	Ok(coin_info)

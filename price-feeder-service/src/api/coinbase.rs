@@ -49,7 +49,7 @@ impl CoinbasePriceApi {
 						price: price_data.amount,
 						supply: Decimal::ZERO,
 						time: chrono::Utc::now().timestamp().unsigned_abs(),
-						provider: "coinbase".to_string(),
+						provider: crate::types::Aggregator::Coinbase,
 					};
 					quotations.push(quotation);
 				},

@@ -42,7 +42,6 @@ where
 	loop {
 		let start = tokio::time::Instant::now();
 		
-		// 1. Fetch from main API (Coinbase, Coingecko, Custom)
 		let assets_refs: Vec<&AssetSpecifier> = supported_currencies.iter().collect();
 		let quotations = api.get_quotations(assets_refs).await;
 		
@@ -109,7 +108,6 @@ pub async fn run_feed_loop(
 	loop {
 		let start = tokio::time::Instant::now();
 		
-		// 1. Fetch from Pyth and update fallback
 		let pyth_future = async {
 			match pyth_updater.run_update(pyth_client.clone()).await {
 				Ok((tx_hash_opt, price_data)) => {
@@ -130,10 +128,13 @@ pub async fn run_feed_loop(
 		for asset in &supported_currencies {
 			// Hierarchy: coinbase -> coingecko -> pyth
 			let mut selected_tf = storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coinbase);
+			info!("Checking price for {} on Coinbase: {:?}", asset.symbol, selected_tf);
 			if selected_tf.is_none() {
 				selected_tf = storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coingecko);
+				info!("Checking price for {} on CoinGecko: {:?}", asset.symbol, selected_tf);
 			}
 			if selected_tf.is_none() {
+				info!("Checking price for {} on Pyth: {:?}", asset.symbol, selected_tf);
 				// Pyth uses "unknown" as blockchain in our updater
 				selected_tf = storage.get_timeframe(&asset.symbol, "unknown", Aggregator::Pyth);
 			}

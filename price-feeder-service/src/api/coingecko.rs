@@ -2,6 +2,7 @@ use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::info;
 
 use crate::api::error::CoingeckoError;
 use crate::args::CoingeckoConfig;
@@ -31,7 +32,8 @@ impl CoingeckoPriceApi {
 	) -> Result<Vec<Quotation>, CoingeckoError> {
 		// Map used for the reverse lookup of the CoinGecko ID to the asset
 		let mut id_to_asset_map: HashMap<String, AssetSpecifier> = HashMap::new();
-
+		// log all
+		info!("Getting CoinGecko prices for assets: {:?}", assets);
 		let coingecko_ids = assets
 			.clone()
 			.into_iter()
@@ -48,6 +50,9 @@ impl CoingeckoPriceApi {
 			})
 			.collect::<Vec<_>>();
 
+		// mapped id's
+		info!("Mapped CoinGecko IDs for assets: {:?}", id_to_asset_map);
+
 		if coingecko_ids.is_empty() {
 			return Ok(vec![]);
 		}
@@ -56,7 +61,7 @@ impl CoingeckoPriceApi {
 			self.client.price(&coingecko_ids, false, true, false, true).await.map_err(|e| {
 				CoingeckoError(format!("Couldn't query CoinGecko prices {}", e.to_string()))
 			})?;
-
+		info!("Received CoinGecko price data for IDs: {:?}", id_to_price_map);
 		let quotations = id_to_price_map
 			.into_iter()
 			.filter_map(|(id, price)| {
@@ -71,7 +76,7 @@ impl CoingeckoPriceApi {
 					price: price.usd, // Decimal to f64
 					supply,
 					time,
-					provider: "coingecko".to_string(),
+					provider: crate::types::Aggregator::Coingecko,
 				})
 			})
 			.collect();
@@ -91,8 +96,8 @@ impl CoingeckoPriceApi {
 		match (blockchain.as_str(), symbol.as_str()) {
 			("BASE", "EURC") => Some("euro-coin".to_string()),
 			("BASE", "USDC") => Some("usd-coin".to_string()),
-			("BASE", "BRLA") => Some("brla".to_string()),
-			("BASE", "BRL") => Some("brla".to_string()),
+			("BASE", "BRLA") => Some("brla-digital-brla".to_string()),
+			("BASE", "BRL") => Some("brla-digital-brla".to_string()),
 			_ => None,
 		}
 	}
@@ -124,21 +129,7 @@ impl CoingeckoClient {
 	}
 
 	async fn get<R: DeserializeOwned>(&self, endpoint: &str) -> Result<R, CoingeckoError> {
-		let mut headers = reqwest::header::HeaderMap::new();
-		headers.insert("accept", reqwest::header::HeaderValue::from_static("application/json"));
-
-		// We supply a different header for the demo API
-		let mut api_key = reqwest::header::HeaderValue::from_str(self.api_key.as_str())
-			.map_err(|e| CoingeckoError(format!("Could not set API key header value: {}", e)))?;
-		api_key.set_sensitive(true);
-		if self.host.contains("pro-api") {
-			headers.insert("x-cg-pro-api-key", api_key);
-		} else {
-			headers.insert("x-cg-demo-api-key", api_key);
-		}
-
 		let client = reqwest::Client::builder()
-			.default_headers(headers)
 			.build()
 			.map_err(|e| CoingeckoError(e.to_string()))?;
 
@@ -146,9 +137,18 @@ impl CoingeckoClient {
 			format!("{host}/{ep}", host = self.host.as_str(), ep = endpoint).as_str(),
 		)
 		.expect("Invalid URL");
+		info!("Making request to CoinGecko API with URL: {}", url);
+
+		let mut request = client.get(url).header("accept", "application/json");
+
+		if self.host.contains("pro-api") {
+			request = request.header("x-cg-pro-api-key", self.api_key.as_str());
+		} else {
+			request = request.header("x-cg-demo-api-key", self.api_key.as_str());
+		}
 
 		let response =
-			client.get(url).send().await.map_err(|e| {
+			request.send().await.map_err(|e| {
 				CoingeckoError(format!("Failed to send request: {}", e.to_string()))
 			})?;
 
