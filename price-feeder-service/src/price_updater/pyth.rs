@@ -8,11 +8,19 @@ use serde::Deserialize;
 use std::error::Error;
 use std::sync::Arc;
 
+use crate::types::AssetSpecifier;
+use std::collections::{HashSet, HashMap};
+
 // ── Pyth Hermes API types ─────────────────────────────────────────────────────
 
-const USDC_PRICE_FEED_ID: &str = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
-const EURC_PRICE_FEED_ID: &str = "76fa85158bf14ede77087fe3ae472f66213f6ea2f5b411cb2de472794990fa5c";
-const BRLA_PRICE_FEED_ID: &str = "d2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906";
+pub fn get_pyth_id(symbol: &str) -> Option<&'static str> {
+	match symbol.to_uppercase().as_str() {
+		"USDC" => Some("eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"),
+		"EURC" => Some("76fa85158bf14ede77087fe3ae472f66213f6ea2f5b411cb2de472794990fa5c"),
+		"BRL" | "BRLA" => Some("d2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906"),
+		_ => None,
+	}
+}
 
 #[derive(Debug, Deserialize)]
 pub struct HermesPrice {
@@ -48,10 +56,34 @@ sol! {
 	}
 }
 
-pub async fn fetch_pyth_prices() -> Result<(HermesResponse, PriceData), Box<dyn Error + Send + Sync + 'static>> {
+pub async fn fetch_pyth_prices(
+	supported_currencies: &HashSet<AssetSpecifier>,
+) -> Result<(HermesResponse, PriceData), Box<dyn Error + Send + Sync + 'static>> {
+	let mut pyth_ids_to_symbols: HashMap<&str, String> = HashMap::new();
+	let mut query_params = String::new();
+
+	for asset in supported_currencies {
+		if let Some(id) = get_pyth_id(&asset.symbol) {
+			if !pyth_ids_to_symbols.contains_key(id) {
+				pyth_ids_to_symbols.insert(id, asset.symbol.clone());
+				query_params.push_str(&format!("ids%5B%5D={}&", id));
+			}
+		}
+	}
+
+	if pyth_ids_to_symbols.is_empty() {
+		return Ok((
+			HermesResponse { binary: HermesBinary { data: vec![] }, parsed: vec![] },
+			PriceData { prices: HashMap::new() },
+		));
+	}
+
+	// Remove trailing '&'
+	query_params.pop();
+
     let api_url = format!(
-        "https://hermes.pyth.network/v2/updates/price/latest?ids%5B%5D={}&ids%5B%5D={}&ids%5B%5D={}",
-        USDC_PRICE_FEED_ID, EURC_PRICE_FEED_ID, BRLA_PRICE_FEED_ID
+        "https://hermes.pyth.network/v2/updates/price/latest?{}",
+        query_params
     );
 
     debug!("Fetching Pyth prices from Hermes API...");
@@ -62,31 +94,25 @@ pub async fn fetch_pyth_prices() -> Result<(HermesResponse, PriceData), Box<dyn 
 
     let data: HermesResponse = response.json().await?;
 
-    let mut usdc_price = None;
-    let mut eurc_price = None;
-    let mut brla_price = None;
+    let mut prices = HashMap::new();
     for entry in &data.parsed {
         let price_val = entry
             .price
             .price
             .parse::<f64>()
             .map_err(|e| format!("Failed to parse price: {}", e))?;
-        let actual_price = price_val * 10f64.powi(entry.price.expo);
-        if entry.id == USDC_PRICE_FEED_ID {
-            usdc_price = Some(actual_price);
-        } else if entry.id == EURC_PRICE_FEED_ID {
-            eurc_price = Some(actual_price);
-        } else if entry.id == BRLA_PRICE_FEED_ID {
-            brla_price = Some(actual_price);
-            // price for BRLA is expected to be in USD/BRL format, so we need to invert it to get BRL/USD
-            brla_price = Some(1.0 / brla_price.unwrap());
-        }
+        let mut actual_price = price_val * 10f64.powi(entry.price.expo);
+        
+        if let Some(symbol) = pyth_ids_to_symbols.get(entry.id.as_str()) {
+			// BRL price comes as USD/BRL from Pyth, invert to BRL/USD
+			if symbol.to_uppercase() == "BRL" || symbol.to_uppercase() == "BRLA" {
+				actual_price = 1.0 / actual_price;
+			}
+			prices.insert(symbol.clone(), actual_price);
+		}
     }
-    let usdc = usdc_price.ok_or("USDC price not found")?;
-    let eurc = eurc_price.ok_or("EURC price not found")?;
-    let brla = brla_price.ok_or("BRLA price not found")?;
 
-    let price_data = PriceData { usdc, eurc, brla };
+    let price_data = PriceData { prices };
     Ok((data, price_data))
 }
 
@@ -112,13 +138,14 @@ impl PythPriceUpdater {
 	pub async fn run_update(
 		&mut self,
 		client: Arc<ChainClient>,
+		supported_currencies: &HashSet<AssetSpecifier>,
 	) -> Result<(Option<B256>, PriceData), Box<dyn Error + Send + Sync + 'static>> {
 		let should_update_contract = match self.last_update {
 			None => true,
 			Some(t) => t.elapsed() >= self.update_interval,
 		};
 
-        let (data, price_data) = fetch_pyth_prices().await?;
+        let (data, price_data) = fetch_pyth_prices(supported_currencies).await?;
 
 		let tx_hash = if should_update_contract {
 			let bytes_data: Vec<Bytes> = data

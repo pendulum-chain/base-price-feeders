@@ -62,9 +62,9 @@ where
 
 		// Fetch Pyth prices. Purely for storage update as coinbase/coingecko final backups.
 		let pyth_future = async {
-			match pyth::fetch_pyth_prices().await {
+			match pyth::fetch_pyth_prices(&supported_currencies).await {
 				Ok((_data, price_data)) => {
-					info!("Pyth prices fetched in fetch loop: USDC={}, EURC={}, BRLA={}", price_data.usdc, price_data.eurc, price_data.brla);
+					info!("Pyth prices fetched in fetch loop: {:?}", price_data.prices);
 					let time = chrono::Utc::now().timestamp().unsigned_abs();
 					
 					let update_pyth = |symbol: &str, price: f64| {
@@ -79,9 +79,10 @@ where
 							provider: Aggregator::Pyth,
 						});
 					};
-					update_pyth("USDC", price_data.usdc);
-					update_pyth("EURC", price_data.eurc);
-					update_pyth("BRL", price_data.brla);
+					
+					for (symbol, price) in &price_data.prices {
+						update_pyth(symbol, *price);
+					}
 				}
 				Err(e) => {
 					error!("Failed to fetch Pyth prices in fetch loop: {:?}", e);
@@ -116,9 +117,9 @@ pub async fn run_feed_loop(
 		let start = tokio::time::Instant::now();
 		
 		let pyth_future = async {
-			match pyth_updater.run_update(pyth_client.clone()).await {
+			match pyth_updater.run_update(pyth_client.clone(), &supported_currencies).await {
 				Ok((tx_hash_opt, price_data)) => {
-					info!("Pyth prices fetched in feed loop: USDC={}, EURC={}, BRLA={}", price_data.usdc, price_data.eurc, price_data.brla);
+					info!("Pyth prices fetched in feed loop: {:?}", price_data.prices);
 					if let Some(tx_hash) = tx_hash_opt {
 						send_tx(&update_tx, TxKind::Pyth, tx_hash);
 					}
@@ -137,10 +138,10 @@ pub async fn run_feed_loop(
 			let mut selected_tf = storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coinbase);
 			if selected_tf.is_none() {
 				selected_tf = storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coingecko);
-				warn!("Checking price for {} on CoinGecko: {:?}", asset.symbol, selected_tf);
+				warn!("Coinbase failed for {}. Checking price on CoinGecko", asset.symbol);
 			}
 			if selected_tf.is_none() {
-				warn!("Checking price for {} on Pyth: {:?}", asset.symbol, selected_tf);
+				warn!("Coingecko failed for {}. Checking price on Pyth",S asset.symbol);
 				// Pyth uses "unknown" as blockchain in our updater
 				selected_tf = storage.get_timeframe(&asset.symbol, "unknown", Aggregator::Pyth);
 			}
@@ -159,27 +160,28 @@ pub async fn run_feed_loop(
 			} else {
 				match dark_oracle_updater.update_prices(&currencies_to_feed, dark_oracle_client.clone()).await {
 					Ok((tx_hash, price_data)) => {
-						info!("DarkOracle tx submitted: USDC={}, EURC={}, BRLA={}", price_data.usdc, price_data.eurc, price_data.brla);
+						info!("DarkOracle tx submitted: {:?}", price_data.prices);
 						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
 
 						// Price divergence validation logic here
 						let pyth_eurc_tf = storage.get_timeframe("EURC", "unknown", Aggregator::Pyth);
 						if let Some(pyth_tf) = pyth_eurc_tf {
-							let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
-							let fallback = (pyth_tf.price as f64) / scale;
-							let price = price_data.eurc;
-							let abs_div = if fallback > price { fallback - price } else { price - fallback };
-							let bp_div = (abs_div * BIPS_DIVISOR as f64) / fallback;
-							debug!("EURC divergence: {:.2} bp (DarkOracle: {}, Pyth: {})", bp_div, price, fallback);
+							if let Some(&price) = price_data.prices.get("EURC") {
+								let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
+								let fallback = (pyth_tf.price as f64) / scale;
+								let abs_div = if fallback > price { fallback - price } else { price - fallback };
+								let bp_div = (abs_div * BIPS_DIVISOR as f64) / fallback;
+								debug!("EURC divergence: {:.2} bp (DarkOracle: {}, Pyth: {})", bp_div, price, fallback);
 
-							if bp_div > divergence_threshold_bp as f64 {
-								let _ = divergence_tx.try_send(PriceDivergenceAlert {
-									asset: "EURC".to_string(),
-									bp_divergence: bp_div,
-									threshold_bp: divergence_threshold_bp,
-									dark_oracle_price: price,
-									pyth_price: fallback,
-								});
+								if bp_div > divergence_threshold_bp as f64 {
+									let _ = divergence_tx.try_send(PriceDivergenceAlert {
+										asset: "EURC".to_string(),
+										bp_divergence: bp_div,
+										threshold_bp: divergence_threshold_bp,
+										dark_oracle_price: price,
+										pyth_price: fallback,
+									});
+								}
 							}
 						}
 					}

@@ -92,9 +92,9 @@ impl ChainClient {
 	}
 }
 
+use std::collections::HashMap;
+
 #[derive(Debug, Clone)]
 pub struct PriceData {
-	pub usdc: f64,
-	pub eurc: f64,
-	pub brla: f64,
+	pub prices: HashMap<String, f64>,
 }

@@ -42,10 +42,6 @@ impl DarkOracleUpdater {
 		let symbol_to_price: HashMap<&str, u128> =
 			currencies.iter().map(|c| (c.symbol.as_str(), c.price)).collect();
 
-		let usdc_raw = symbol_to_price.get("USDC").ok_or("USDC price not found")?;
-		let eurc_raw = symbol_to_price.get("EURC").ok_or("EURC price not found")?;
-		let brla_raw = symbol_to_price.get("BRL").ok_or("BRL price not found")?;
-
 		let mut prices: [u64; 5] = [0; 5];
 
 		// ETH index 0
@@ -94,10 +90,13 @@ impl DarkOracleUpdater {
 		let tx_hash = *pending_tx.tx_hash();
 		info!("DarkOracle updatePriceFeeds tx hash: {:?}", tx_hash);
 
+		let mut prices_map = HashMap::new();
+		for (symbol, price) in &symbol_to_price {
+			prices_map.insert(symbol.to_string(), *price as f64 / 10f64.powi(18));
+		}
+
 		let price_data = PriceData {
-			usdc: *usdc_raw as f64 / 10f64.powi(18),
-			eurc: *eurc_raw as f64 / 10f64.powi(18),
-			brla: *brla_raw as f64 / 10f64.powi(18),
+			prices: prices_map,
 		};
 
 		Ok((tx_hash, price_data))
