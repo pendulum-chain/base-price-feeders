@@ -36,7 +36,9 @@ pub struct UpdateTx {
 pub async fn run_tx_processor(mut rx: mpsc::Receiver<UpdateTx>) {
 	let rpc_url = std::env::var("RPC_URL").expect("RPC_URL not set");
 	let provider = Arc::new(
-		ProviderBuilder::new().on_http(Url::parse(&rpc_url).expect("Invalid RPC_URL")).boxed(),
+		ProviderBuilder::new()
+			.on_http(Url::parse(&rpc_url).expect("Invalid RPC_URL"))
+			.boxed(),
 	);
 
 	while let Some(tx) = rx.recv().await {
@@ -61,15 +63,15 @@ where
 					on_tx_reverted(kind, &receipt).await;
 				}
 				break;
-			}
+			},
 			Ok(None) => {
 				// Transaction not yet mined, wait and poll again
 				tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-			}
+			},
 			Err(e) => {
 				on_tx_error(kind, Box::new(e)).await;
 				break;
-			}
+			},
 		}
 	}
 }

@@ -2,14 +2,14 @@ use alloy::{
 	primitives::{Address, B256},
 	sol,
 };
-use log::{info, warn};
+use log::info;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::types::CoinInfo;
 use super::chain::{ChainClient, PriceData};
+use crate::types::CoinInfo;
 
 sol! {
 	#[sol(rpc)]
@@ -36,15 +36,11 @@ impl DarkOracleUpdater {
 		client: Arc<ChainClient>,
 	) -> Result<(B256, PriceData), Box<dyn Error + Send + Sync + 'static>> {
 		info!("Starting DarkOracle contract price update...");
-		
+
 		let oracle = DarkOracle::new(self.contract_address, &*client.provider);
 
 		let symbol_to_price: HashMap<&str, u128> =
 			currencies.iter().map(|c| (c.symbol.as_str(), c.price)).collect();
-
-		let usdc_raw = symbol_to_price.get("USDC").ok_or("USDC price not found")?;
-		let eurc_raw = symbol_to_price.get("EURC").ok_or("EURC price not found")?;
-		let brla_raw = symbol_to_price.get("BRL").ok_or("BRL price not found")?;
 
 		let mut prices: [u64; 5] = [0; 5];
 
@@ -74,9 +70,7 @@ impl DarkOracleUpdater {
 		}
 
 		let timestamp = u64::try_from(
-			std::time::SystemTime::now()
-				.duration_since(std::time::UNIX_EPOCH)?
-				.as_millis(),
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis(),
 		)?;
 
 		info!("Updating DarkOracle contract prices: {:?}", prices);
@@ -96,11 +90,12 @@ impl DarkOracleUpdater {
 		let tx_hash = *pending_tx.tx_hash();
 		info!("DarkOracle updatePriceFeeds tx hash: {:?}", tx_hash);
 
-		let price_data = PriceData {
-			usdc: *usdc_raw as f64 / 10f64.powi(18),
-			eurc: *eurc_raw as f64 / 10f64.powi(18),
-			brla: *brla_raw as f64 / 10f64.powi(18),
-		};
+		let mut prices_map = HashMap::new();
+		for (symbol, price) in &symbol_to_price {
+			prices_map.insert(symbol.to_string(), *price as f64 / 10f64.powi(18));
+		}
+
+		let price_data = PriceData { prices: prices_map };
 
 		Ok((tx_hash, price_data))
 	}
