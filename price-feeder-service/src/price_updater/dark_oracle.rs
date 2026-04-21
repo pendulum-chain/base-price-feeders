@@ -2,7 +2,7 @@ use alloy::{
 	primitives::{Address, B256},
 	sol,
 };
-use log::{info, warn};
+use log::info;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::error::Error;

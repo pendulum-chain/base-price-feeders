@@ -1,4 +1,3 @@
-use crate::info;
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -23,7 +22,7 @@ impl CoingeckoPriceApi {
 	pub fn new(host_url: String, api_key: String) -> Self {
 		let client = CoingeckoClient::new(host_url, api_key);
 
-		Self { client }
+		Self { client: client.unwrap() }
 	}
 
 	pub async fn get_prices(

@@ -1,7 +1,6 @@
 use crate::api::coinbase::CoinbasePriceApi;
 use crate::api::coingecko::CoingeckoPriceApi;
-use crate::api::custom::CustomPriceApi;
-use crate::api::error::{CoinbaseError, CoingeckoError, CustomError};
+use crate::api::error::{CoinbaseError, CoingeckoError};
 use crate::args::CoingeckoConfig;
 use crate::types::Quotation;
 use crate::AssetSpecifier;
@@ -9,7 +8,6 @@ use async_trait::async_trait;
 
 pub mod coinbase;
 pub mod coingecko;
-pub mod custom;
 pub mod error;
 
 #[async_trait]
@@ -20,7 +18,6 @@ pub trait PriceApi {
 pub struct PriceApiImpl {
 	coinbase_price_api: CoinbasePriceApi,
 	coingecko_price_api: CoingeckoPriceApi,
-	custom_price_api: CustomPriceApi,
 }
 
 impl PriceApiImpl {
@@ -28,7 +25,6 @@ impl PriceApiImpl {
 		Self {
 			coinbase_price_api: CoinbasePriceApi::new(),
 			coingecko_price_api: CoingeckoPriceApi::new_from_config(config),
-			custom_price_api: CustomPriceApi::new(),
 		}
 	}
 }
@@ -37,19 +33,6 @@ impl PriceApiImpl {
 impl PriceApi for PriceApiImpl {
 	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> Vec<Quotation> {
 		let mut quotations = Vec::new();
-
-		let custom_assets: Vec<&AssetSpecifier> = assets
-			.iter()
-			.copied()
-			.filter(|asset| self.custom_price_api.is_supported(asset))
-			.collect();
-
-		let (custom_quotes, custom_quote_errors) = self.get_custom_quotations(custom_assets).await;
-
-		quotations.extend(custom_quotes);
-		for error in custom_quote_errors {
-			log::error!("Error getting custom quotation: {}", error);
-		}
 
 		let coinbase_assets: Vec<&AssetSpecifier> = assets
 			.iter()
@@ -92,23 +75,5 @@ impl PriceApiImpl {
 	) -> Result<Vec<Quotation>, CoingeckoError> {
 		let quotations = self.coingecko_price_api.get_prices(assets).await?;
 		Ok(quotations)
-	}
-
-	async fn get_custom_quotations(
-		&self,
-		assets: Vec<&AssetSpecifier>,
-	) -> (Vec<Quotation>, Vec<CustomError>) {
-		let mut quotations = Vec::new();
-		let mut errors = Vec::new();
-
-		for asset in assets {
-			let quotation_result = self.custom_price_api.get_price(asset).await;
-			match quotation_result {
-				Ok(quotation) => quotations.push(quotation),
-				Err(e) => errors.push(e),
-			};
-		}
-
-		(quotations, errors)
 	}
 }

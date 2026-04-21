@@ -6,7 +6,7 @@ pub mod pyth;
 pub mod tx_processor;
 
 pub use alerts::PriceDivergenceAlert;
-pub use chain::{ChainClient, PriceData};
+pub use chain::ChainClient;
 pub use dark_oracle::DarkOracleUpdater;
 pub use pyth::PythPriceUpdater;
 pub use tx_processor::UpdateTx;
@@ -18,7 +18,6 @@ use crate::AssetSpecifier;
 use alloy::primitives::B256;
 use helpers::{convert_to_coin_info, BIPS_DIVISOR};
 use log::{debug, error, info, warn};
-use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::error::Error;
 use std::sync::Arc;
@@ -47,17 +46,14 @@ where
 
 		let quotations_future = async {
 			let quotations = api.get_quotations(assets_refs).await;
-			let mut currencies = vec![];
 			for q in quotations {
 				match convert_to_coin_info(q.clone()) {
 					Ok(ci) => {
-						currencies.push(ci.clone());
 						storage.update_timeframe(ci);
 					},
 					Err(e) => error!("Error converting to CoinInfo: {:#?}", e),
 				}
 			}
-			storage.replace_currencies_by_symbols(currencies);
 		};
 
 		// Fetch Pyth prices. Purely for storage update as coinbase/coingecko final backups.
