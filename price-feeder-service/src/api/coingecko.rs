@@ -113,25 +113,30 @@ pub struct CoingeckoPrice {
 
 /// CoinGecko network client
 pub struct CoingeckoClient {
+	client: reqwest::Client,
 	host: String,
 	api_key: String,
 }
 
 impl CoingeckoClient {
-	pub fn new(host: String, api_key: String) -> Self {
-		CoingeckoClient { host, api_key }
-	}
-
-	async fn get<R: DeserializeOwned>(&self, endpoint: &str) -> Result<R, CoingeckoError> {
+	pub fn new(host: String, api_key: String) -> Result<Self, CoingeckoError> {
 		let client =
 			reqwest::Client::builder().build().map_err(|e| CoingeckoError(e.to_string()))?;
 
+		Ok(CoingeckoClient {
+			client,
+			host,
+			api_key,
+		})
+	}
+
+	async fn get<R: DeserializeOwned>(&self, endpoint: &str) -> Result<R, CoingeckoError> {
 		let url = reqwest::Url::parse(
 			format!("{host}/{ep}", host = self.host.as_str(), ep = endpoint).as_str(),
 		)
 		.expect("Invalid URL");
 
-		let mut request = client.get(url).header("accept", "application/json");
+		let mut request = self.client.get(url).header("accept", "application/json");
 
 		if self.host.contains("pro-api") {
 			request = request.header("x-cg-pro-api-key", self.api_key.as_str());
