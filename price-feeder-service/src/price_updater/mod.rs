@@ -171,7 +171,7 @@ pub async fn run_feed_loop(
 						info!("DarkOracle tx submitted: {:?}", price_data.prices);
 						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
 
-						// Price divergence validation logic here
+						// Price divergence validation for EURC
 						let pyth_eurc_tf =
 							storage.get_timeframe("EURC", "unknown", Aggregator::Pyth);
 						if let Some(pyth_tf) = pyth_eurc_tf {
@@ -190,13 +190,23 @@ pub async fn run_feed_loop(
 								);
 
 								if bp_div > divergence_threshold_bp as f64 {
-									let _ = divergence_tx.try_send(PriceDivergenceAlert {
+									let alert = PriceDivergenceAlert {
 										asset: "EURC".to_string(),
 										bp_divergence: bp_div,
 										threshold_bp: divergence_threshold_bp,
 										dark_oracle_price: price,
 										pyth_price: fallback,
-									});
+									};
+									if let Err(e) = divergence_tx.try_send(alert) {
+										match e {
+											mpsc::error::TrySendError::Full(_) => {
+												warn!("Divergence alert channel full — alert dropped");
+											},
+											mpsc::error::TrySendError::Closed(_) => {
+												error!("Divergence alert channel closed");
+											},
+										}
+									}
 								}
 							}
 						}
