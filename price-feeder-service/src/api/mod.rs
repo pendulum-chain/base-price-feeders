@@ -38,19 +38,24 @@ impl PriceApi for PriceApiImpl {
 	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> Vec<Quotation> {
 		let mut quotations = Vec::new();
 
-		let custom_assets: Vec<&AssetSpecifier> =
-			assets.iter().copied().filter(|asset| self.custom_price_api.is_supported(asset)).collect();
+		let custom_assets: Vec<&AssetSpecifier> = assets
+			.iter()
+			.copied()
+			.filter(|asset| self.custom_price_api.is_supported(asset))
+			.collect();
 
-		let (custom_quotes, custom_quote_errors) =
-			self.get_custom_quotations(custom_assets).await;
+		let (custom_quotes, custom_quote_errors) = self.get_custom_quotations(custom_assets).await;
 
 		quotations.extend(custom_quotes);
 		for error in custom_quote_errors {
 			log::error!("Error getting custom quotation: {}", error);
 		}
 
-		let coinbase_assets: Vec<&AssetSpecifier> =
-			assets.iter().copied().filter(|asset| CoinbasePriceApi::is_supported(asset)).collect();
+		let coinbase_assets: Vec<&AssetSpecifier> = assets
+			.iter()
+			.copied()
+			.filter(|asset| CoinbasePriceApi::is_supported(asset))
+			.collect();
 
 		let coinbase_quotes = self.get_coinbase_quotations(coinbase_assets).await;
 		match coinbase_quotes {

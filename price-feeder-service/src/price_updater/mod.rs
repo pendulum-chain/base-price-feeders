@@ -6,7 +6,7 @@ pub mod pyth;
 pub mod tx_processor;
 
 pub use alerts::PriceDivergenceAlert;
-pub use chain::{PriceData, ChainClient};
+pub use chain::{ChainClient, PriceData};
 pub use dark_oracle::DarkOracleUpdater;
 pub use pyth::PythPriceUpdater;
 pub use tx_processor::UpdateTx;
@@ -15,15 +15,15 @@ use crate::api::PriceApi;
 use crate::storage::CoinInfoStorage;
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
+use alloy::primitives::B256;
 use helpers::{convert_to_coin_info, BIPS_DIVISOR};
 use log::{debug, error, info, warn};
+use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::error::Error;
-use alloy::primitives::B256;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tx_processor::{UpdateTx as Tx, UpdateTxKind as TxKind};
-use rust_decimal::Decimal;
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
@@ -41,10 +41,10 @@ where
 
 	loop {
 		let start = tokio::time::Instant::now();
-		
+
 		let assets_refs: Vec<&AssetSpecifier> = supported_currencies.iter().collect();
 		let storage_pyth = storage.clone();
-		
+
 		let quotations_future = async {
 			let quotations = api.get_quotations(assets_refs).await;
 			let mut currencies = vec![];
@@ -65,7 +65,7 @@ where
 			match pyth::fetch_pyth_prices(&supported_currencies).await {
 				Ok((_data, price_data)) => {
 					let time = chrono::Utc::now().timestamp().unsigned_abs();
-					
+
 					let update_pyth = |symbol: &str, price: f64| {
 						let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
 						storage_pyth.update_timeframe(CoinInfo {
@@ -78,14 +78,14 @@ where
 							provider: Aggregator::Pyth,
 						});
 					};
-					
+
 					for (symbol, price) in &price_data.prices {
 						update_pyth(symbol, *price);
 					}
-				}
+				},
 				Err(e) => {
 					error!("Failed to fetch Pyth prices in fetch loop: {:?}", e);
-				}
+				},
 			}
 		};
 
@@ -93,7 +93,10 @@ where
 
 		debug!("Storage state after fetch loop iteration:");
 		for (key, tf) in storage.timeframes.read().unwrap().iter() {
-			debug!("{}: {} (provider: {:?}) (timestamp: {})", key, tf.price, tf.provider, tf.last_update_timestamp);
+			debug!(
+				"{}: {} (provider: {:?}) (timestamp: {})",
+				key, tf.price, tf.provider, tf.last_update_timestamp
+			);
 		}
 
 		let elapsed = start.elapsed();
@@ -119,7 +122,7 @@ pub async fn run_feed_loop(
 
 	loop {
 		let start = tokio::time::Instant::now();
-		
+
 		let pyth_future = async {
 			match pyth_updater.run_update(pyth_client.clone(), &supported_currencies).await {
 				Ok((tx_hash_opt, price_data)) => {
@@ -127,10 +130,10 @@ pub async fn run_feed_loop(
 					if let Some(tx_hash) = tx_hash_opt {
 						send_tx(&update_tx, TxKind::Pyth, tx_hash);
 					}
-				}
+				},
 				Err(e) => {
 					error!("Failed to fetch/submit Pyth prices: {:?}", e);
-				}
+				},
 			}
 		};
 
@@ -139,13 +142,15 @@ pub async fn run_feed_loop(
 
 		for asset in &supported_currencies {
 			// Hierarchy: coinbase -> coingecko -> pyth
-			let mut selected_tf = storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coinbase);
+			let mut selected_tf =
+				storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coinbase);
 			if selected_tf.is_none() {
-				selected_tf = storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coingecko);
+				selected_tf =
+					storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coingecko);
 				warn!("Coinbase failed for {}. Checking price on CoinGecko", asset.symbol);
 			}
 			if selected_tf.is_none() {
-				warn!("Coingecko failed for {}. Checking price on Pyth",asset.symbol);
+				warn!("Coingecko failed for {}. Checking price on Pyth", asset.symbol);
 				// Pyth uses "unknown" as blockchain in our updater
 				selected_tf = storage.get_timeframe(&asset.symbol, "unknown", Aggregator::Pyth);
 			}
@@ -162,20 +167,31 @@ pub async fn run_feed_loop(
 			if missing_data {
 				error!("Rejecting feeding transaction because at least 1 token is missing data");
 			} else {
-				match dark_oracle_updater.update_prices(&currencies_to_feed, dark_oracle_client.clone()).await {
+				match dark_oracle_updater
+					.update_prices(&currencies_to_feed, dark_oracle_client.clone())
+					.await
+				{
 					Ok((tx_hash, price_data)) => {
 						info!("DarkOracle tx submitted: {:?}", price_data.prices);
 						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
 
 						// Price divergence validation logic here
-						let pyth_eurc_tf = storage.get_timeframe("EURC", "unknown", Aggregator::Pyth);
+						let pyth_eurc_tf =
+							storage.get_timeframe("EURC", "unknown", Aggregator::Pyth);
 						if let Some(pyth_tf) = pyth_eurc_tf {
 							if let Some(&price) = price_data.prices.get("EURC") {
 								let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
 								let fallback = (pyth_tf.price as f64) / scale;
-								let abs_div = if fallback > price { fallback - price } else { price - fallback };
+								let abs_div = if fallback > price {
+									fallback - price
+								} else {
+									price - fallback
+								};
 								let bp_div = (abs_div * BIPS_DIVISOR as f64) / fallback;
-								debug!("EURC divergence: {:.2} bp (DarkOracle: {}, Pyth: {})", bp_div, price, fallback);
+								debug!(
+									"EURC divergence: {:.2} bp (DarkOracle: {}, Pyth: {})",
+									bp_div, price, fallback
+								);
 
 								if bp_div > divergence_threshold_bp as f64 {
 									let _ = divergence_tx.try_send(PriceDivergenceAlert {
@@ -188,10 +204,10 @@ pub async fn run_feed_loop(
 								}
 							}
 						}
-					}
+					},
 					Err(e) => {
 						error!("Failed to submit DarkOracle tx: {:?}", e);
-					}
+					},
 				}
 			}
 		};
@@ -211,10 +227,10 @@ fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 		match e {
 			mpsc::error::TrySendError::Full(_) => {
 				warn!("[{kind}] tx_processor channel full — tx_hash dropped");
-			}
+			},
 			mpsc::error::TrySendError::Closed(_) => {
 				error!("[{kind}] tx_processor channel closed");
-			}
+			},
 		}
 	}
 }

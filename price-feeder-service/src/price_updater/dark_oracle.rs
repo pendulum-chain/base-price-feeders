@@ -95,9 +95,7 @@ impl DarkOracleUpdater {
 			prices_map.insert(symbol.to_string(), *price as f64 / 10f64.powi(18));
 		}
 
-		let price_data = PriceData {
-			prices: prices_map,
-		};
+		let price_data = PriceData { prices: prices_map };
 
 		Ok((tx_hash, price_data))
 	}

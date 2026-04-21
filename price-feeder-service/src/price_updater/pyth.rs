@@ -9,7 +9,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use crate::types::AssetSpecifier;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 // ── Pyth Hermes API types ─────────────────────────────────────────────────────
 
@@ -81,39 +81,36 @@ pub async fn fetch_pyth_prices(
 	// Remove trailing '&'
 	query_params.pop();
 
-    let api_url = format!(
-        "https://hermes.pyth.network/v2/updates/price/latest?{}",
-        query_params
-    );
+	let api_url = format!("https://hermes.pyth.network/v2/updates/price/latest?{}", query_params);
 
-    debug!("Fetching Pyth prices from Hermes API...");
-    let response = reqwest::get(&api_url).await?;
-    if !response.status().is_success() {
-        return Err(format!("Hermes API request failed: {}", response.status()).into());
-    }
+	debug!("Fetching Pyth prices from Hermes API...");
+	let response = reqwest::get(&api_url).await?;
+	if !response.status().is_success() {
+		return Err(format!("Hermes API request failed: {}", response.status()).into());
+	}
 
-    let data: HermesResponse = response.json().await?;
+	let data: HermesResponse = response.json().await?;
 
-    let mut prices = HashMap::new();
-    for entry in &data.parsed {
-        let price_val = entry
-            .price
-            .price
-            .parse::<f64>()
-            .map_err(|e| format!("Failed to parse price: {}", e))?;
-        let mut actual_price = price_val * 10f64.powi(entry.price.expo);
-        
-        if let Some(symbol) = pyth_ids_to_symbols.get(entry.id.as_str()) {
+	let mut prices = HashMap::new();
+	for entry in &data.parsed {
+		let price_val = entry
+			.price
+			.price
+			.parse::<f64>()
+			.map_err(|e| format!("Failed to parse price: {}", e))?;
+		let mut actual_price = price_val * 10f64.powi(entry.price.expo);
+
+		if let Some(symbol) = pyth_ids_to_symbols.get(entry.id.as_str()) {
 			// BRL price comes as USD/BRL from Pyth, invert to BRL/USD
 			if symbol.to_uppercase() == "BRL" || symbol.to_uppercase() == "BRLA" {
 				actual_price = 1.0 / actual_price;
 			}
 			prices.insert(symbol.clone(), actual_price);
 		}
-    }
+	}
 
-    let price_data = PriceData { prices };
-    Ok((data, price_data))
+	let price_data = PriceData { prices };
+	Ok((data, price_data))
 }
 
 // ── Pyth price updater ────────────────────────────────────────────────────────
@@ -145,7 +142,7 @@ impl PythPriceUpdater {
 			Some(t) => t.elapsed() >= self.update_interval,
 		};
 
-        let (data, price_data) = fetch_pyth_prices(supported_currencies).await?;
+		let (data, price_data) = fetch_pyth_prices(supported_currencies).await?;
 
 		let tx_hash = if should_update_contract {
 			let bytes_data: Vec<Bytes> = data

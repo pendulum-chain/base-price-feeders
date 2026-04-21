@@ -1,8 +1,8 @@
+use crate::info;
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::info;
 
 use crate::api::error::CoingeckoError;
 use crate::args::CoingeckoConfig;
@@ -123,9 +123,8 @@ impl CoingeckoClient {
 	}
 
 	async fn get<R: DeserializeOwned>(&self, endpoint: &str) -> Result<R, CoingeckoError> {
-		let client = reqwest::Client::builder()
-			.build()
-			.map_err(|e| CoingeckoError(e.to_string()))?;
+		let client =
+			reqwest::Client::builder().build().map_err(|e| CoingeckoError(e.to_string()))?;
 
 		let url = reqwest::Url::parse(
 			format!("{host}/{ep}", host = self.host.as_str(), ep = endpoint).as_str(),
@@ -140,10 +139,10 @@ impl CoingeckoClient {
 			request = request.header("x-cg-demo-api-key", self.api_key.as_str());
 		}
 
-		let response =
-			request.send().await.map_err(|e| {
-				CoingeckoError(format!("Failed to send request: {}", e.to_string()))
-			})?;
+		let response = request
+			.send()
+			.await
+			.map_err(|e| CoingeckoError(format!("Failed to send request: {}", e.to_string())))?;
 
 		if !response.status().is_success() {
 			let result = response.text().await;
