@@ -14,7 +14,7 @@ pub struct CoingeckoPriceApi {
 
 impl CoingeckoPriceApi {
 	pub fn new_from_config(config: CoingeckoConfig) -> Self {
-		let api_key = config.cg_api_key.expect("Please provide a CoinGecko API key");
+		let api_key = config.cg_api_key;
 
 		Self::new(config.cg_host_url, api_key)
 	}

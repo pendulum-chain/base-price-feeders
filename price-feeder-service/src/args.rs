@@ -56,7 +56,7 @@ pub struct DiaApiArgs {
 #[derive(Parser, Debug, Clone)]
 pub struct CoingeckoConfig {
 	#[clap(long, env = "CG_API_KEY")]
-	pub cg_api_key: Option<String>,
+	pub cg_api_key: String,
 
 	#[clap(long, env = "CG_HOST_URL", default_value = "https://pro-api.coingecko.com")]
 	pub cg_host_url: String,
