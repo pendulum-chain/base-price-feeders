@@ -59,7 +59,7 @@ impl CoingeckoPriceApi {
 			.into_iter()
 			.filter_map(|(id, price)| {
 				let asset = id_to_asset_map.get(&id)?;
-				let supply = price.usd_24h_vol.unwrap_or_default();
+				let supply = Decimal::ZERO;
 				let time = price.last_updated_at;
 
 				Some(Quotation {

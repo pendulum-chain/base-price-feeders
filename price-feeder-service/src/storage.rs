@@ -24,7 +24,8 @@ impl CoinInfoStorage {
 			if selected_tf.is_none() {
 				selected_tf = self.get_timeframe(&spec.symbol, "unknown", Aggregator::Pyth);
 			}
-			if let Some(tf) = selected_tf {
+			if let Some(mut tf) = selected_tf {
+				tf.blockchain = spec.blockchain.clone().into();
 				result.push(tf);
 			}
 		}
