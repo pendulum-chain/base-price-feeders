@@ -64,7 +64,6 @@ where
 		let pyth_future = async {
 			match pyth::fetch_pyth_prices(&supported_currencies).await {
 				Ok((_data, price_data)) => {
-					info!("Pyth prices fetched in fetch loop: {:?}", price_data.prices);
 					let time = chrono::Utc::now().timestamp().unsigned_abs();
 					
 					let update_pyth = |symbol: &str, price: f64| {
@@ -91,6 +90,11 @@ where
 		};
 
 		tokio::join!(quotations_future, pyth_future);
+
+		debug!("Storage state after fetch loop iteration:");
+		for (key, tf) in storage.timeframes.read().unwrap().iter() {
+			debug!("{}: {} (provider: {:?}) (timestamp: {})", key, tf.price, tf.provider, tf.last_update_timestamp);
+		}
 
 		let elapsed = start.elapsed();
 		if elapsed < update_interval {
@@ -141,7 +145,7 @@ pub async fn run_feed_loop(
 				warn!("Coinbase failed for {}. Checking price on CoinGecko", asset.symbol);
 			}
 			if selected_tf.is_none() {
-				warn!("Coingecko failed for {}. Checking price on Pyth",S asset.symbol);
+				warn!("Coingecko failed for {}. Checking price on Pyth",asset.symbol);
 				// Pyth uses "unknown" as blockchain in our updater
 				selected_tf = storage.get_timeframe(&asset.symbol, "unknown", Aggregator::Pyth);
 			}

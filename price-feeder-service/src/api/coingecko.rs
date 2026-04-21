@@ -88,7 +88,7 @@ impl CoingeckoPriceApi {
 		let blockchain = asset.blockchain.to_uppercase();
 		let symbol = asset.symbol.to_uppercase();
 		match (blockchain.as_str(), symbol.as_str()) {
-			//("BASE", "EURC") => Some("euro-coin".to_string()),
+			("BASE", "EURC") => Some("euro-coin".to_string()),
 			("BASE", "USDC") => Some("usd-coin".to_string()),
 			("BASE", "BRLA") => Some("brla-digital-brla".to_string()),
 			("BASE", "BRL") => Some("brla-digital-brla".to_string()),
