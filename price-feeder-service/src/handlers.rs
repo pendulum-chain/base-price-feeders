@@ -26,10 +26,12 @@ mod tests {
 
 	fn get_storage() -> Arc<CoinInfoStorage> {
 		let storage = Arc::new(CoinInfoStorage::default());
-		storage.replace_currencies_by_symbols(vec![
-			CoinInfo { symbol: "BTC".into(), blockchain: "Bitcoin".into(), ..Default::default() },
-			CoinInfo { symbol: "ETH".into(), blockchain: "Ethereum".into(), ..Default::default() },
-		]);
+		storage.update_timeframe(
+			CoinInfo { symbol: "BTC".into(), blockchain: "Bitcoin".into(), provider: crate::types::Aggregator::Coinbase, ..Default::default() },
+		);
+		storage.update_timeframe(
+			CoinInfo { symbol: "ETH".into(), blockchain: "Ethereum".into(), provider: crate::types::Aggregator::Coinbase, ..Default::default() },
+		);
 		storage
 	}
 

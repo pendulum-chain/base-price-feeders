@@ -1,8 +1,8 @@
 use crate::types::{CoinInfo, Quotation};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::{error::Error};
 
 pub const BIPS_DIVISOR: u64 = 10000;
 
@@ -33,7 +33,7 @@ pub fn convert_decimal_to_u128(input: &Decimal) -> Result<u128, ConvertingError>
 }
 
 pub fn convert_to_coin_info(value: Quotation) -> Result<CoinInfo, Box<dyn Error + Sync + Send>> {
-	let Quotation { name, symbol, blockchain, price, time, supply } = value;
+	let Quotation { name, symbol, blockchain, price, time, supply, provider, .. } = value;
 
 	let price = convert_decimal_to_u128(&price)?;
 	let supply = convert_decimal_to_u128(&supply)?;
@@ -45,6 +45,7 @@ pub fn convert_to_coin_info(value: Quotation) -> Result<CoinInfo, Box<dyn Error 
 		price,
 		last_update_timestamp: time,
 		supply,
+		provider,
 	};
 
 	Ok(coin_info)

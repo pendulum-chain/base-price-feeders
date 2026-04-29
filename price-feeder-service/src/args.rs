@@ -48,4 +48,16 @@ pub struct DiaApiArgs {
 	/// Slack channel ID for alerts
 	#[clap(long, env = "SLACK_CHANNEL_ID")]
 	pub slack_channel_id: Option<String>,
+
+	#[clap(flatten)]
+	pub coingecko: CoingeckoConfig,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct CoingeckoConfig {
+	#[clap(long, env = "CG_API_KEY")]
+	pub cg_api_key: String,
+
+	#[clap(long, env = "CG_HOST_URL", default_value = "https://pro-api.coingecko.com")]
+	pub cg_host_url: String,
 }
