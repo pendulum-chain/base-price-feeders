@@ -64,6 +64,7 @@ export async function checkStaleness() {
     } else {
       let eventTimestampMs = 0;
 
+      // Iterate through logs to find the most recent valid timestamps
       for (const log of logsDescending) {
         if (log.eventName === "PricesUpdated") {
           const ts = Number((log.args as any).timestamp);
@@ -126,7 +127,7 @@ export async function checkOraclePrices() {
     const pythContractAgeLimitSecs = Number(pythAdapterMaxAgeSeconds) * config.SAFETY_MARGIN;
     const currentTimestampSecs = Math.floor(Date.now() / 1000);
 
-    // 2. Check each feed
+    // 2. Check for each feed, which was the publish time of the latest price update on the Pyth contract.
     for (const [feedName, feedId] of Object.entries(config.PYTH_FEEDS)) {
       const publishTimeSecs = await withTimeout(publicClient.readContract({
         address: pythAdapterContractAddress,
