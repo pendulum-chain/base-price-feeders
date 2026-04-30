@@ -25,7 +25,7 @@ export const config = {
   PYTH_FEEDS: {
     eurcUsd: "0x76fa85158bf14ede77087fe3ae472f66213f6ea2f5b411cb2de472794990fa5c" as `0x${string}`,
     usdcUsd: "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a" as `0x${string}`,
-    brlaUsd: "0x1b9c8e5a7c3f2d9e4b1a5c6d8e7f9a0b2c3d4e5f67890abcdef1234567890abcd" as `0x${string}`,
+    brlaUsd: "0xd2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906" as `0x${string}`,
   }
 };
 
