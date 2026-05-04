@@ -1,6 +1,8 @@
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 use crate::api::error::BinanceError;
 use crate::types::Quotation;
@@ -97,6 +99,8 @@ pub struct BinancePrice {
 pub struct BinanceClient {
 	host: String,
 	inner: reqwest::Client,
+
+	call_counter: Arc<AtomicU8>,
 }
 
 impl BinanceClient {
@@ -106,7 +110,7 @@ impl BinanceClient {
 
 	pub fn new(host: String) -> Self {
 		let inner = reqwest::Client::new();
-		Self { host, inner }
+		Self { host, inner, call_counter: Arc::new(AtomicU8::new(0)) }
 	}
 
 	async fn get<R: DeserializeOwned>(&self, endpoint: &str) -> Result<R, BinanceError> {
@@ -114,6 +118,21 @@ impl BinanceClient {
 			format!("{host}/{ep}", host = self.host.as_str(), ep = endpoint).as_str(),
 		)
 		.expect("Invalid URL");
+
+		// Mock failure window: succeed on calls up to 10, fail on calls 20-30, then
+		// recover 
+		let prev = self.call_counter.fetch_update(
+			Ordering::SeqCst,
+			Ordering::SeqCst,
+			|c| Some(c.saturating_add(1)),
+		).unwrap_or(0);
+		let call_number = prev.saturating_add(1);
+		if (20..30).contains(&call_number) {
+			return Err(BinanceError(format!(
+				"Simulated API failure (mock, call #{})",
+				call_number
+			)));
+		}
 
 		let response = self
 			.inner

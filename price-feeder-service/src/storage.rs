@@ -3,6 +3,9 @@ use crate::AssetSpecifier;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+/// Maximum age in seconds for a stored entry before it is considered stale.
+pub const MAX_ENTRY_AGE_SECS: u64 = 2;
+
 #[derive(Default, Clone)]
 pub struct CoinInfoStorage {
 	pub timeframes: Arc<RwLock<HashMap<String, CoinInfo>>>, // Key: token_blockchain_provider
@@ -37,7 +40,24 @@ impl CoinInfoStorage {
 		self.timeframes.write().unwrap().insert(key, coin_info);
 	}
 
+	/// Returns the stored entry only if it is fresher than `MAX_ENTRY_AGE_SECS`.
 	pub fn get_timeframe(
+		&self,
+		token: &str,
+		blockchain: &str,
+		provider: Aggregator,
+	) -> Option<CoinInfo> {
+		let tf = self.get_timeframe_any(token, blockchain, provider)?;
+		let now = chrono::Utc::now().timestamp().unsigned_abs();
+		if now.saturating_sub(tf.last_update_timestamp) > MAX_ENTRY_AGE_SECS {
+			None
+		} else {
+			Some(tf)
+		}
+	}
+
+	/// Returns the stored entry regardless of its age.
+	pub fn get_timeframe_any(
 		&self,
 		token: &str,
 		blockchain: &str,

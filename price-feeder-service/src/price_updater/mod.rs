@@ -51,11 +51,18 @@ impl Default for ProviderHierarchy {
 	}
 }
 
+// Number of consecutive hierarchy-exhausted occurrences before we send the
+// disable tx on-chain. Anything below this threshold is considered transient.
+const DISABLE_FAILURE_THRESHOLD: u8 = 3;
+
 // Tracks the state of problematic assets.
 // Note: There is no "Enabled" state because once an asset is successfully
 // enabled on-chain, it is removed from the tracking map entirely.
 #[derive(Debug, Clone, PartialEq)]
 enum AssetStatus {
+	// Hierarchy exhausted but we haven't yet hit DISABLE_FAILURE_THRESHOLD.
+	// The counter holds the number of consecutive failures so far.
+	Failing(u8),
 	Disabled(dark_oracle::AssetMetadata),
 	Enabling(dark_oracle::AssetMetadata),
 }
@@ -66,8 +73,13 @@ async fn handle_asset_recovery(
 	dark_oracle_updater: DarkOracleUpdater,
 ) {
 	let mut disabled_guard = disabled_assets.lock().await;
-	if let Some(status) = disabled_guard.get(asset_symbol) {
-		if let AssetStatus::Disabled(meta) = status {
+	match disabled_guard.get(asset_symbol) {
+		Some(AssetStatus::Failing(_)) => {
+			// Recover from transient failure.
+			info!("Feed for {} recovered before disable threshold, clearing counter", asset_symbol);
+			disabled_guard.remove(asset_symbol);
+		}
+		Some(AssetStatus::Disabled(meta)) => {
 			info!("Recovered feed for {}, sending enable tx", asset_symbol);
 			let meta_clone = meta.clone();
 			disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Enabling(meta_clone.clone()));
@@ -89,29 +101,72 @@ async fn handle_asset_recovery(
 				}
 			});
 		}
+		_ => {}
 	}
 }
 
 async fn handle_asset_exhausted(
-	asset_symbol: &str,
+	asset: &AssetSpecifier,
+	asset_hierarchy: &[Aggregator],
+	storage: &CoinInfoStorage,
 	disabled_assets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, AssetStatus>>>,
-	last_prices: &std::collections::HashMap<String, CoinInfo>,
 	dark_oracle_updater: &DarkOracleUpdater,
 	currencies_to_feed: &mut Vec<CoinInfo>,
 	missing_data: &mut bool,
 ) {
-	let mut disabled_guard = disabled_assets.lock().await;
-	// Only skip the disable tx if the asset is already strictly Disabled.
-	// If it's Enabling, we still want to send a disable tx because the feed was lost again.
-	let is_disabled = matches!(disabled_guard.get(asset_symbol), Some(AssetStatus::Disabled(_)));
+	let asset_symbol = asset.symbol.as_str();
+	// Look up the most recent (but stale) price across the hierarchy.
+	let last_price = asset_hierarchy.iter().find_map(|aggregator| {
+		let blockchain = if *aggregator == Aggregator::Pyth {
+			"unknown"
+		} else {
+			asset.blockchain.as_str()
+		};
+		storage.get_timeframe_any(asset_symbol, blockchain, aggregator.clone())
+	});
 
-	if !is_disabled {
+	let mut disabled_guard = disabled_assets.lock().await;
+
+	let should_send_disable = match disabled_guard.get(asset_symbol) {
+		Some(AssetStatus::Disabled(_)) => false,
+		// Mid-flight enable: the feed has dropped again, so we need to
+		// send a fresh disable tx 
+		Some(AssetStatus::Enabling(_)) => true,
+		Some(AssetStatus::Failing(count)) => {
+			let next = count.saturating_add(1);
+			if next >= DISABLE_FAILURE_THRESHOLD {
+				true
+			} else {
+				info!(
+					"Hierarchy exhausted for {} ({}/{}), deferring disable",
+					asset_symbol, next, DISABLE_FAILURE_THRESHOLD
+				);
+				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(next));
+				false
+			}
+		}
+		// First failure for this asset.
+		None => {
+			if DISABLE_FAILURE_THRESHOLD <= 1 {
+				true
+			} else {
+				info!(
+					"Hierarchy exhausted for {} (1/{}), deferring disable",
+					asset_symbol, DISABLE_FAILURE_THRESHOLD
+				);
+				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(1));
+				false
+			}
+		}
+	};
+
+	if should_send_disable {
 		info!("Hierarchy exhausted for {}, sending disable tx", asset_symbol);
 		match dark_oracle_updater.disable_asset(asset_symbol).await {
 			Ok((_, meta)) => {
 				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Disabled(meta));
-				if let Some(last_tf) = last_prices.get(asset_symbol) {
-					currencies_to_feed.push(last_tf.clone());
+				if let Some(last_tf) = last_price {
+					currencies_to_feed.push(last_tf);
 				} else {
 					error!("No last price available for token: {}", asset_symbol);
 					*missing_data = true;
@@ -123,9 +178,10 @@ async fn handle_asset_exhausted(
 			}
 		}
 	} else {
-		// Already disabled, just use last known price
-		if let Some(last_tf) = last_prices.get(asset_symbol) {
-			currencies_to_feed.push(last_tf.clone());
+		// Either already disabled, or still under the failure threshold:
+		// reuse the last known price if we have one.
+		if let Some(last_tf) = last_price {
+			currencies_to_feed.push(last_tf);
 		} else {
 			error!("No last price available for token: {}", asset_symbol);
 			*missing_data = true;
@@ -224,7 +280,6 @@ pub async fn run_feed_loop(
 	info!("Starting feed loop");
 
 	let disabled_assets = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, AssetStatus>::new()));
-	let mut last_prices = std::collections::HashMap::<String, CoinInfo>::new();
 
 	loop {
 		let start = tokio::time::Instant::now();
@@ -276,14 +331,14 @@ pub async fn run_feed_loop(
 					dark_oracle_updater.clone(),
 				).await;
 
-				last_prices.insert(asset.symbol.clone(), tf.clone());
 				currencies_to_feed.push(tf);
 			} else {
 				// No price found anywhere in the hierarchy
 				handle_asset_exhausted(
-					&asset.symbol,
+					asset,
+					asset_hierarchy,
+					&storage,
 					disabled_assets.clone(),
-					&last_prices,
 					&dark_oracle_updater,
 					&mut currencies_to_feed,
 					&mut missing_data,
