@@ -24,6 +24,33 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tx_processor::{UpdateTx as Tx, UpdateTxKind as TxKind};
 
+#[derive(Debug, Clone)]
+pub struct ProviderHierarchy {
+	pub default: Vec<Aggregator>,
+	pub per_asset: std::collections::HashMap<String, Vec<Aggregator>>,
+}
+
+// Default hierarchy: Binance > Coinbase > Pyth for BRL/BRLA,
+// Coinbase > Coingecko > Pyth for everything else.
+impl Default for ProviderHierarchy {
+	fn default() -> Self {
+		let mut per_asset = std::collections::HashMap::new();
+		per_asset.insert(
+			"BRLA".to_string(),
+			vec![Aggregator::Binance, Aggregator::Coinbase, Aggregator::Pyth],
+		);
+		per_asset.insert(
+			"BRL".to_string(),
+			vec![Aggregator::Binance, Aggregator::Coinbase, Aggregator::Pyth],
+		);
+
+		Self {
+			default: vec![Aggregator::Coinbase, Aggregator::Coingecko, Aggregator::Pyth],
+			per_asset,
+		}
+	}
+}
+
 // ── Public entry point ─────────────────────────────────────────────────────────
 
 pub async fn run_fetch_loop<T>(
@@ -135,20 +162,27 @@ pub async fn run_feed_loop(
 
 		let mut currencies_to_feed = vec![];
 		let mut missing_data = false;
+		let hierarchy = ProviderHierarchy::default();
 
 		for asset in &supported_currencies {
-			// Hierarchy: coinbase -> coingecko -> pyth
-			let mut selected_tf =
-				storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coinbase);
-			if selected_tf.is_none() {
-				selected_tf =
-					storage.get_timeframe(&asset.symbol, &asset.blockchain, Aggregator::Coingecko);
-				warn!("Coinbase failed for {}. Checking price on CoinGecko", asset.symbol);
-			}
-			if selected_tf.is_none() {
-				warn!("Coingecko failed for {}. Checking price on Pyth", asset.symbol);
-				// Pyth uses "unknown" as blockchain in our updater
-				selected_tf = storage.get_timeframe(&asset.symbol, "unknown", Aggregator::Pyth);
+			let asset_hierarchy = hierarchy
+				.per_asset
+				.get(&asset.symbol)
+				.unwrap_or(&hierarchy.default);
+
+			let mut selected_tf = None;
+			for aggregator in asset_hierarchy {
+				let blockchain = if *aggregator == Aggregator::Pyth {
+					"unknown"
+				} else {
+					asset.blockchain.as_str()
+				};
+				selected_tf = storage.get_timeframe(&asset.symbol, blockchain, aggregator.clone());
+				if selected_tf.is_some() {
+					break;
+				} else {
+					warn!("{} failed for {}. Trying next provider.", aggregator, asset.symbol);
+				}
 			}
 
 			if let Some(tf) = selected_tf {
