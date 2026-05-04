@@ -20,14 +20,19 @@ sol! {
 
 pub struct DarkOracleUpdater {
 	contract_address: Address,
+	update_interval: std::time::Duration,
 }
 
 impl DarkOracleUpdater {
-	pub fn new() -> Result<Self, Box<dyn Error + Send + Sync + 'static>> {
+	pub fn new(update_interval: std::time::Duration) -> Result<Self, Box<dyn Error + Send + Sync + 'static>> {
 		let contract_address =
 			std::env::var("CONTRACT_ADDRESS").map_err(|_| "CONTRACT_ADDRESS not set")?;
 		let addr = contract_address.parse::<Address>()?;
-		Ok(Self { contract_address: addr })
+		Ok(Self { contract_address: addr, update_interval })
+	}
+
+	pub fn get_update_interval(&self) -> std::time::Duration {
+		self.update_interval
 	}
 
 	pub async fn update_prices(
@@ -79,16 +84,12 @@ impl DarkOracleUpdater {
 		let priority_fee = client.estimate_priority_fee().await?;
 		info!("DarkOracle priority fee: {} wei", priority_fee);
 
-		let nonce = client.nonce_manager.next_nonce();
 		let call_builder = oracle
 			.updatePriceFeeds(prices, timestamp)
 			.gas(1_000_000)
-			.max_priority_fee_per_gas(priority_fee * 7)
-			.nonce(nonce);
+			.max_priority_fee_per_gas(priority_fee * 7);
 
-		let pending_tx = call_builder.send().await?;
-		let tx_hash = *pending_tx.tx_hash();
-		info!("DarkOracle updatePriceFeeds tx hash: {:?}", tx_hash);
+		let tx_hash = client.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval).await?;
 
 		let mut prices_map = HashMap::new();
 		for (symbol, price) in &symbol_to_price {

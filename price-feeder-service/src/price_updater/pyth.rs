@@ -150,22 +150,13 @@ impl PythPriceUpdater {
 				.data
 				.iter()
 				.map(|hex_str| {
-					let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-					Bytes::from(hex::decode(stripped).unwrap_or_default())
+					let hex_cleaned = hex_str.trim_start_matches("0x");
+					let bytes = hex::decode(hex_cleaned).unwrap();
+					Bytes::from(bytes)
 				})
 				.collect();
 
-			match self.update_contract(bytes_data, client).await {
-				Ok(hash) => {
-					self.last_update = Some(std::time::Instant::now());
-					info!("Pyth contract tx submitted ✓");
-					Some(hash)
-				},
-				Err(e) => {
-					error!("Failed to submit Pyth contract tx: {:?}", e);
-					None
-				},
-			}
+			Some(self.update_contract(bytes_data, client).await?)
 		} else {
 			None
 		};
@@ -179,24 +170,17 @@ impl PythPriceUpdater {
 		client: Arc<ChainClient>,
 	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
 		let pyth_adapter = PythAdapter::new(self.adapter_address, &*client.provider);
-
 		let update_fee = pyth_adapter.getUpdateFee(bytes_data.clone()).call().await?.updateFee_;
-		info!("Pyth update fee: {} wei", update_fee);
-
 		let priority_fee = client.estimate_priority_fee().await?;
 		info!("Pyth priority fee: {} wei", priority_fee);
 
-		let nonce = client.nonce_manager.next_nonce();
 		let call_builder = pyth_adapter
 			.updatePriceFeeds(bytes_data)
 			.value(update_fee)
 			.gas(1_000_000)
-			.max_priority_fee_per_gas(priority_fee * 7)
-			.nonce(nonce);
+			.max_priority_fee_per_gas(priority_fee * 7);
 
-		let pending_tx = call_builder.send().await?;
-		let tx_hash = *pending_tx.tx_hash();
-		info!("Pyth updatePriceFeeds tx hash: {:?}", tx_hash);
+		let tx_hash = client.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval).await?;
 
 		Ok(tx_hash)
 	}

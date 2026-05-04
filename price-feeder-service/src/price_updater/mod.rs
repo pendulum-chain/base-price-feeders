@@ -132,7 +132,6 @@ where
 pub async fn run_feed_loop(
 	storage: Arc<CoinInfoStorage>,
 	supported_currencies: HashSet<AssetSpecifier>,
-	update_interval: std::time::Duration,
 	divergence_threshold_bp: u64,
 	dark_oracle_updater: DarkOracleUpdater,
 	dark_oracle_client: Arc<ChainClient>,
@@ -202,7 +201,6 @@ pub async fn run_feed_loop(
 					.await
 				{
 					Ok((tx_hash, price_data)) => {
-						info!("DarkOracle tx submitted: {:?}", price_data.prices);
 						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
 
 						// Price divergence validation for EURC
@@ -253,7 +251,7 @@ pub async fn run_feed_loop(
 		};
 
 		tokio::join!(pyth_future, dark_oracle_future);
-
+		let update_interval = dark_oracle_updater.get_update_interval();
 		let elapsed = start.elapsed();
 		if elapsed < update_interval {
 			tokio::time::sleep(update_interval - elapsed).await;
