@@ -37,16 +37,98 @@ impl Default for ProviderHierarchy {
 		let mut per_asset = std::collections::HashMap::new();
 		per_asset.insert(
 			"BRLA".to_string(),
-			vec![Aggregator::Binance, Aggregator::Coinbase, Aggregator::Pyth],
+			vec![Aggregator::Binance],
 		);
 		per_asset.insert(
 			"BRL".to_string(),
-			vec![Aggregator::Binance, Aggregator::Coinbase, Aggregator::Pyth],
+			vec![Aggregator::Binance],
 		);
 
 		Self {
 			default: vec![Aggregator::Coinbase, Aggregator::Coingecko, Aggregator::Pyth],
 			per_asset,
+		}
+	}
+}
+
+// Tracks the state of problematic assets.
+// Note: There is no "Enabled" state because once an asset is successfully
+// enabled on-chain, it is removed from the tracking map entirely.
+#[derive(Debug, Clone, PartialEq)]
+enum AssetStatus {
+	Disabled(dark_oracle::AssetMetadata),
+	Enabling(dark_oracle::AssetMetadata),
+}
+
+async fn handle_asset_recovery(
+	asset_symbol: &str,
+	disabled_assets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, AssetStatus>>>,
+	dark_oracle_updater: DarkOracleUpdater,
+) {
+	let mut disabled_guard = disabled_assets.lock().await;
+	if let Some(status) = disabled_guard.get(asset_symbol) {
+		if let AssetStatus::Disabled(meta) = status {
+			info!("Recovered feed for {}, sending enable tx", asset_symbol);
+			let meta_clone = meta.clone();
+			disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Enabling(meta_clone.clone()));
+
+			let symbol_clone = asset_symbol.to_string();
+			let updater_clone = dark_oracle_updater.clone();
+			let disabled_assets_clone = disabled_assets.clone();
+
+			tokio::spawn(async move {
+				if let Err(e) = updater_clone.enable_asset(&symbol_clone, &meta_clone).await {
+					error!("Failed to enable {}: {:?}", symbol_clone, e);
+				} else {
+					let mut guard = disabled_assets_clone.lock().await;
+					// Only remove if the status hasn't been flipped back to Disabled in the meantime
+					if let Some(AssetStatus::Enabling(_)) = guard.get(&symbol_clone) {
+						guard.remove(&symbol_clone);
+						info!("Successfully enabled {}", symbol_clone);
+					}
+				}
+			});
+		}
+	}
+}
+
+async fn handle_asset_exhausted(
+	asset_symbol: &str,
+	disabled_assets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, AssetStatus>>>,
+	last_prices: &std::collections::HashMap<String, CoinInfo>,
+	dark_oracle_updater: &DarkOracleUpdater,
+	currencies_to_feed: &mut Vec<CoinInfo>,
+	missing_data: &mut bool,
+) {
+	let mut disabled_guard = disabled_assets.lock().await;
+	// Only skip the disable tx if the asset is already strictly Disabled.
+	// If it's Enabling, we still want to send a disable tx because the feed was lost again.
+	let is_disabled = matches!(disabled_guard.get(asset_symbol), Some(AssetStatus::Disabled(_)));
+
+	if !is_disabled {
+		info!("Hierarchy exhausted for {}, sending disable tx", asset_symbol);
+		match dark_oracle_updater.disable_asset(asset_symbol).await {
+			Ok((_, meta)) => {
+				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Disabled(meta));
+				if let Some(last_tf) = last_prices.get(asset_symbol) {
+					currencies_to_feed.push(last_tf.clone());
+				} else {
+					error!("No last price available for token: {}", asset_symbol);
+					*missing_data = true;
+				}
+			}
+			Err(e) => {
+				error!("Failed to disable asset {}: {:?}", asset_symbol, e);
+				*missing_data = true;
+			}
+		}
+	} else {
+		// Already disabled, just use last known price
+		if let Some(last_tf) = last_prices.get(asset_symbol) {
+			currencies_to_feed.push(last_tf.clone());
+		} else {
+			error!("No last price available for token: {}", asset_symbol);
+			*missing_data = true;
 		}
 	}
 }
@@ -134,13 +216,15 @@ pub async fn run_feed_loop(
 	supported_currencies: HashSet<AssetSpecifier>,
 	divergence_threshold_bp: u64,
 	dark_oracle_updater: DarkOracleUpdater,
-	dark_oracle_client: Arc<ChainClient>,
 	divergence_tx: mpsc::Sender<PriceDivergenceAlert>,
 	update_tx: mpsc::Sender<UpdateTx>,
 	mut pyth_updater: PythPriceUpdater,
 	pyth_client: Arc<ChainClient>,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 	info!("Starting feed loop");
+
+	let disabled_assets = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, AssetStatus>::new()));
+	let mut last_prices = std::collections::HashMap::<String, CoinInfo>::new();
 
 	loop {
 		let start = tokio::time::Instant::now();
@@ -185,10 +269,25 @@ pub async fn run_feed_loop(
 			}
 
 			if let Some(tf) = selected_tf {
+				// We found a price. Check if it was previously disabled.
+				handle_asset_recovery(
+					&asset.symbol,
+					disabled_assets.clone(),
+					dark_oracle_updater.clone(),
+				).await;
+
+				last_prices.insert(asset.symbol.clone(), tf.clone());
 				currencies_to_feed.push(tf);
 			} else {
-				error!("No data available for token: {}", asset.symbol);
-				missing_data = true;
+				// No price found anywhere in the hierarchy
+				handle_asset_exhausted(
+					&asset.symbol,
+					disabled_assets.clone(),
+					&last_prices,
+					&dark_oracle_updater,
+					&mut currencies_to_feed,
+					&mut missing_data,
+				).await;
 			}
 		}
 
@@ -197,7 +296,7 @@ pub async fn run_feed_loop(
 				error!("Rejecting feeding transaction because at least 1 token is missing data");
 			} else {
 				match dark_oracle_updater
-					.update_prices(&currencies_to_feed, dark_oracle_client.clone())
+					.update_prices(&currencies_to_feed)
 					.await
 				{
 					Ok((tx_hash, price_data)) => {

@@ -72,10 +72,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 	let pyth_updater =
 		PythPriceUpdater::new(std::time::Duration::from_secs(pyth_update_interval_seconds))?;
-	let dark_oracle_updater = DarkOracleUpdater::new(std::time::Duration::from_secs(update_interval_seconds))?;
 	let nonce_manager = ChainClient::create_nonce_manager().await?;
 	let dark_oracle_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
 	let pyth_client = Arc::new(ChainClient::new(nonce_manager).await?);
+	let dark_oracle_updater = DarkOracleUpdater::new(
+		dark_oracle_client.clone(),
+		std::time::Duration::from_secs(update_interval_seconds),
+	)?;
 
 	let fetch_storage = storage.clone();
 	let fetch_currencies = supported_currencies.clone();
@@ -105,7 +108,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			feed_currencies,
 			price_divergence_threshold_bp,
 			dark_oracle_updater,
-			dark_oracle_client,
 			divergence_tx,
 			update_tx,
 			pyth_updater,
