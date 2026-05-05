@@ -59,7 +59,7 @@ impl DarkOracleUpdater {
 		let raw = match symbol {
 			"USDC" => Some("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
 			"EURC" => Some("0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42"),
-			"BRL" | "BRLA" => Some("0x57180796D4082Ba903d86c4eA3C86490fA10512c"),
+			"BRL" | "BRLA" => Some("0xfCB34c47f850f452C15EA1B84d51231C38A61783"),
 			_ => None,
 		}?;
 		raw.parse::<Address>().ok()
