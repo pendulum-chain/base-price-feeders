@@ -64,6 +64,7 @@ export async function checkStaleness() {
     } else {
       let eventTimestampMs = 0;
 
+      // Iterate through logs to find the most recent valid timestamps
       for (const log of logsDescending) {
         if (log.eventName === "PricesUpdated") {
           const ts = Number((log.args as any).timestamp);
@@ -126,32 +127,39 @@ export async function checkOraclePrices() {
     const pythContractAgeLimitSecs = Number(pythAdapterMaxAgeSeconds) * config.SAFETY_MARGIN;
     const currentTimestampSecs = Math.floor(Date.now() / 1000);
 
-    // 2. Check each feed
+    // 2. Check for each feed, which was the publish time of the latest price update on the Pyth contract.
     for (const [feedName, feedId] of Object.entries(config.PYTH_FEEDS)) {
-      const publishTimeSecs = await withTimeout(publicClient.readContract({
-        address: pythAdapterContractAddress,
-        abi: PYTH_CONTRACT_ABI,
-        functionName: 'latestPriceInfoPublishTime',
-        args: [feedId]
-      }));
+      try {
+        const publishTimeSecs = await withTimeout(publicClient.readContract({
+          address: pythAdapterContractAddress,
+          abi: PYTH_CONTRACT_ABI,
+          functionName: 'latestPriceInfoPublishTime',
+          args: [feedId]
+        }));
 
-      const priceAgeSecs = currentTimestampSecs - Number(publishTimeSecs);
+        const priceAgeSecs = currentTimestampSecs - Number(publishTimeSecs);
 
-      if (priceAgeSecs > pythContractAgeLimitSecs) {
+        if (priceAgeSecs > pythContractAgeLimitSecs) {
+          await sendSlackAlert(
+            `🚨 Oracle Staleness Alert: Pyth Feed ${feedName} is stale!\n` +
+            `• Current Age: ${priceAgeSecs}s\n` +
+            `• Max Age: ${pythAdapterMaxAgeSeconds}s\n` +
+            `• Safety Margin: ${config.SAFETY_MARGIN * 100}%\n` +
+            `• Effective Threshold: ${pythContractAgeLimitSecs}s`
+          );
+        } else {
+          console.log(
+            `✅ Pyth ${feedName} feed is fresh:\n` +
+            `• Current Age: ${priceAgeSecs}s\n` +
+            `• Max Age: ${pythAdapterMaxAgeSeconds}s\n` +
+            `• Safety Margin: ${config.SAFETY_MARGIN * 100}%\n` +
+            `• Effective Threshold: ${pythContractAgeLimitSecs}s`
+          );
+        }
+      } catch (feedError) {
+        console.error(`Failed to check Pyth feed ${feedName}:`, feedError);
         await sendSlackAlert(
-          `🚨 Oracle Staleness Alert: Pyth Feed ${feedName} is stale!\n` +
-          `• Current Age: ${priceAgeSecs}s\n` +
-          `• Max Age: ${pythAdapterMaxAgeSeconds}s\n` +
-          `• Safety Margin: ${config.SAFETY_MARGIN * 100}%\n` +
-          `• Effective Threshold: ${pythContractAgeLimitSecs}s`
-        );
-      } else {
-        console.log(
-          `✅ Pyth ${feedName} feed is fresh:\n` +
-          `• Current Age: ${priceAgeSecs}s\n` +
-          `• Max Age: ${pythAdapterMaxAgeSeconds}s\n` +
-          `• Safety Margin: ${config.SAFETY_MARGIN * 100}%\n` +
-          `• Effective Threshold: ${pythContractAgeLimitSecs}s`
+          `⚠️ Monitor Error: Failed to check Pyth feed ${feedName}. ${(feedError as Error).message}`
         );
       }
     }
