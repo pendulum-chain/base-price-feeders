@@ -51,6 +51,18 @@ pub struct DiaApiArgs {
 
 	#[clap(flatten)]
 	pub coingecko: CoingeckoConfig,
+
+	#[clap(flatten)]
+	pub fastforex: FastForexConfig,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct FastForexConfig {
+	#[clap(long, env = "FF_API_KEY", default_value = "")]
+	pub ff_api_key: String,
+
+	#[clap(long, env = "FF_HOST_URL", default_value = "https://api.fastforex.io")]
+	pub ff_host_url: String,
 }
 
 #[derive(Parser, Debug, Clone)]

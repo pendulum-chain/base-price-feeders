@@ -9,7 +9,9 @@ pub enum Aggregator {
 	Unknown,
 	Coinbase,
 	Coingecko,
+	Binance,
 	Pyth,
+	FastForex,
 	Custom(String),
 }
 
@@ -18,7 +20,9 @@ impl From<&str> for Aggregator {
 		match s.to_lowercase().as_str() {
 			"coinbase" => Aggregator::Coinbase,
 			"coingecko" => Aggregator::Coingecko,
+			"binance" => Aggregator::Binance,
 			"pyth" => Aggregator::Pyth,
+			"fastforex" => Aggregator::FastForex,
 			_ => Aggregator::Custom(s.to_string()),
 		}
 	}
@@ -30,7 +34,9 @@ impl std::fmt::Display for Aggregator {
 			Aggregator::Unknown => write!(f, "unknown"),
 			Aggregator::Coinbase => write!(f, "coinbase"),
 			Aggregator::Coingecko => write!(f, "coingecko"),
+			Aggregator::Binance => write!(f, "binance"),
 			Aggregator::Pyth => write!(f, "pyth"),
+			Aggregator::FastForex => write!(f, "fastforex"),
 			Aggregator::Custom(s) => write!(f, "{}", s),
 		}
 	}
