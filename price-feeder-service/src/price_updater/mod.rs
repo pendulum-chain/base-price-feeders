@@ -44,6 +44,11 @@ impl Default for ProviderHierarchy {
 			vec![Aggregator::Binance],
 		);
 
+		per_asset.insert(
+			"EURC".to_string(),
+			vec![Aggregator::FastForex, Aggregator::Coinbase, Aggregator::Coingecko, Aggregator::Pyth],
+		);
+
 		Self {
 			default: vec![Aggregator::Coinbase, Aggregator::Coingecko, Aggregator::Pyth],
 			per_asset,

@@ -32,3 +32,14 @@ impl Display for BinanceError {
 }
 
 impl std::error::Error for BinanceError {}
+
+#[derive(Debug)]
+pub struct FastForexError(pub String);
+
+impl Display for FastForexError {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		write!(f, "FastForexError: {}", self.0)
+	}
+}
+
+impl std::error::Error for FastForexError {}
