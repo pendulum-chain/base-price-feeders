@@ -1,8 +1,6 @@
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
 
 use crate::api::error::BinanceError;
 use crate::types::Quotation;

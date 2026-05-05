@@ -112,13 +112,13 @@ impl ChainClient {
 		let start_time = std::time::Instant::now();
 		let max_elapsed = std::time::Duration::from_secs_f64(update_interval.as_secs_f64() * MAX_ELAPSED_INTERVAL_MULTIPLIER);
 		let mut retries = 0;
+		let mut nonce = self.nonce_manager.next_nonce();
 		loop {
 			let elapsed = start_time.elapsed();
 			if retries > 0 && elapsed >= max_elapsed {
 				return Err(format!("Dropped outdated transaction. Elapsed: {:?}, Max allowed: {:?}", elapsed, max_elapsed).into());
 			}
 
-			let nonce = self.nonce_manager.next_nonce();
 			tx_req.nonce = Some(nonce);
 
 			match alloy::providers::Provider::send_transaction(&*self.provider, tx_req.clone()).await {
@@ -135,6 +135,7 @@ impl ChainClient {
 							&*self.provider, self.address
 						).await?;
 						self.nonce_manager.sync_nonce(chain_nonce);
+						nonce = self.nonce_manager.next_nonce();
 					} else {
 						log::warn!("Tx error: {}. Retrying {}/5...", err_msg, retries);
 						tokio::time::sleep(std::time::Duration::from_millis(TX_RETRY_DELAY_MS)).await;

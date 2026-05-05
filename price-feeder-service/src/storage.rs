@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// Maximum age in seconds for a stored entry before it is considered stale.
-pub const MAX_ENTRY_AGE_SECS: u64 = 2;
+/// Should be at least a few multiples of the fetch cadence to account for
+/// brief delays, GC pauses, etc.
+pub const MAX_ENTRY_AGE_SECS: u64 = 10;
 
 #[derive(Default, Clone)]
 pub struct CoinInfoStorage {

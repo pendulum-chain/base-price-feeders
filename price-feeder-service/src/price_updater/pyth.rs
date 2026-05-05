@@ -145,18 +145,22 @@ impl PythPriceUpdater {
 		let (data, price_data) = fetch_pyth_prices(supported_currencies).await?;
 
 		let tx_hash = if should_update_contract {
-			let bytes_data: Vec<Bytes> = data
+			let bytes_data: Result<Vec<Bytes>, _> = data
 				.binary
 				.data
 				.iter()
 				.map(|hex_str| {
 					let hex_cleaned = hex_str.trim_start_matches("0x");
-					let bytes = hex::decode(hex_cleaned).unwrap();
-					Bytes::from(bytes)
+					hex::decode(hex_cleaned)
+						.map(Bytes::from)
+						.map_err(|e| format!("Failed to decode hex from Hermes: {}", e))
 				})
 				.collect();
+			let bytes_data = bytes_data?;
 
-			Some(self.update_contract(bytes_data, client).await?)
+			let hash = self.update_contract(bytes_data, client).await?;
+			self.last_update = Some(std::time::Instant::now());
+			Some(hash)
 		} else {
 			None
 		};

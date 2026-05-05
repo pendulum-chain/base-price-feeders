@@ -30,7 +30,7 @@ pub struct ProviderHierarchy {
 	pub per_asset: std::collections::HashMap<String, Vec<Aggregator>>,
 }
 
-// Default hierarchy: Binance > Coinbase > Pyth for BRL/BRLA,
+// Default hierarchy: Binance > Nothing for BRL/BRLA,
 // Coinbase > Coingecko > Pyth for everything else.
 impl Default for ProviderHierarchy {
 	fn default() -> Self {
@@ -125,37 +125,38 @@ async fn handle_asset_exhausted(
 		storage.get_timeframe_any(asset_symbol, blockchain, aggregator.clone())
 	});
 
-	let mut disabled_guard = disabled_assets.lock().await;
-
-	let should_send_disable = match disabled_guard.get(asset_symbol) {
-		Some(AssetStatus::Disabled(_)) => false,
-		// Mid-flight enable: the feed has dropped again, so we need to
-		// send a fresh disable tx 
-		Some(AssetStatus::Enabling(_)) => true,
-		Some(AssetStatus::Failing(count)) => {
-			let next = count.saturating_add(1);
-			if next >= DISABLE_FAILURE_THRESHOLD {
-				true
-			} else {
-				info!(
-					"Hierarchy exhausted for {} ({}/{}), deferring disable",
-					asset_symbol, next, DISABLE_FAILURE_THRESHOLD
-				);
-				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(next));
-				false
+	let should_send_disable = {
+		let mut disabled_guard = disabled_assets.lock().await;
+		match disabled_guard.get(asset_symbol) {
+			Some(AssetStatus::Disabled(_)) => false,
+			// Mid-flight enable: the feed has dropped again, so we need to
+			// send a fresh disable tx
+			Some(AssetStatus::Enabling(_)) => true,
+			Some(AssetStatus::Failing(count)) => {
+				let next = count.saturating_add(1);
+				if next >= DISABLE_FAILURE_THRESHOLD {
+					true
+				} else {
+					info!(
+						"Hierarchy exhausted for {} ({}/{}), deferring disable",
+						asset_symbol, next, DISABLE_FAILURE_THRESHOLD
+					);
+					disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(next));
+					false
+				}
 			}
-		}
-		// First failure for this asset.
-		None => {
-			if DISABLE_FAILURE_THRESHOLD <= 1 {
-				true
-			} else {
-				info!(
-					"Hierarchy exhausted for {} (1/{}), deferring disable",
-					asset_symbol, DISABLE_FAILURE_THRESHOLD
-				);
-				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(1));
-				false
+			// First failure for this asset.
+			None => {
+				if DISABLE_FAILURE_THRESHOLD <= 1 {
+					true
+				} else {
+					info!(
+						"Hierarchy exhausted for {} (1/{}), deferring disable",
+						asset_symbol, DISABLE_FAILURE_THRESHOLD
+					);
+					disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(1));
+					false
+				}
 			}
 		}
 	};
@@ -164,6 +165,7 @@ async fn handle_asset_exhausted(
 		info!("Hierarchy exhausted for {}, sending disable tx", asset_symbol);
 		match dark_oracle_updater.disable_asset(asset_symbol).await {
 			Ok((_, meta)) => {
+				let mut disabled_guard = disabled_assets.lock().await;
 				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Disabled(meta));
 				if let Some(last_tf) = last_price {
 					currencies_to_feed.push(last_tf);
