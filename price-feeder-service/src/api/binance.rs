@@ -113,7 +113,7 @@ impl BinanceClient {
 		let url = reqwest::Url::parse(
 			format!("{host}/{ep}", host = self.host.as_str(), ep = endpoint).as_str(),
 		)
-		.expect("Invalid URL");
+		.map_err(|e| BinanceError(format!("Invalid URL: {}", e)))?;
 
 		let response = self
 			.inner
