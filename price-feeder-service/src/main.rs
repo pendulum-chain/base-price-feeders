@@ -72,19 +72,23 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 	let pyth_updater =
 		PythPriceUpdater::new(std::time::Duration::from_secs(pyth_update_interval_seconds))?;
-	let dark_oracle_updater = DarkOracleUpdater::new()?;
 	let nonce_manager = ChainClient::create_nonce_manager().await?;
 	let dark_oracle_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
 	let pyth_client = Arc::new(ChainClient::new(nonce_manager).await?);
+	let dark_oracle_updater = DarkOracleUpdater::new(
+		dark_oracle_client.clone(),
+		std::time::Duration::from_secs(update_interval_seconds),
+	)?;
 
 	let fetch_storage = storage.clone();
 	let fetch_currencies = supported_currencies.clone();
 	let fetch_update_tx = update_tx.clone();
 	let coingecko_config = args.coingecko.clone();
+	let fastforex_config = args.fastforex.clone();
 
 	tokio::spawn(async move {
 		info!("Starting fetch loop");
-		let price_api = PriceApiImpl::new(coingecko_config);
+		let price_api = PriceApiImpl::new(coingecko_config, fastforex_config);
 		let _ = price_updater::run_fetch_loop(
 			fetch_storage,
 			fetch_currencies,
@@ -103,10 +107,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		let _ = price_updater::run_feed_loop(
 			feed_storage,
 			feed_currencies,
-			std::time::Duration::from_secs(update_interval_seconds),
 			price_divergence_threshold_bp,
 			dark_oracle_updater,
-			dark_oracle_client,
 			divergence_tx,
 			update_tx,
 			pyth_updater,

@@ -21,3 +21,25 @@ impl Display for CoingeckoError {
 }
 
 impl std::error::Error for CoingeckoError {}
+
+#[derive(Debug)]
+pub struct BinanceError(pub String);
+
+impl Display for BinanceError {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		write!(f, "BinanceError: {}", self.0)
+	}
+}
+
+impl std::error::Error for BinanceError {}
+
+#[derive(Debug)]
+pub struct FastForexError(pub String);
+
+impl Display for FastForexError {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		write!(f, "FastForexError: {}", self.0)
+	}
+}
+
+impl std::error::Error for FastForexError {}
