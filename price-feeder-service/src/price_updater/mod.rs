@@ -23,13 +23,16 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tx_processor::{UpdateTx as Tx, UpdateTxKind as TxKind};
+use tx_processor::{ConfirmOutcome, UpdateTx as Tx, UpdateTxKind as TxKind};
 
 pub use configs::ProviderHierarchy;
 
 // Number of consecutive hierarchy-exhausted occurrences before we send the
 // disable tx on-chain. Anything below this threshold is considered transient.
 const DISABLE_FAILURE_THRESHOLD: u8 = 3;
+
+// Backoff between disable-tx resubmissions while we wait for an on-chain
+const DISABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 
 // Tracks the state of problematic assets.
 // Note: There is no "Enabled" state because once an asset is successfully
@@ -144,21 +147,48 @@ async fn handle_asset_exhausted(
 
 	if should_send_disable {
 		info!("Hierarchy exhausted for {}, sending disable tx", asset_symbol);
-		match dark_oracle_updater.disable_asset(asset_symbol).await {
-			Ok((_, meta)) => {
-				let mut disabled_guard = disabled_assets.lock().await;
-				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Disabled(meta));
-				if let Some(last_tf) = last_price {
-					currencies_to_feed.push(last_tf);
-				} else {
-					error!("No last price available for token: {}", asset_symbol);
-					*missing_data = true;
+
+		// Block the feed loop until the disable tx is confirmed on-chain!!
+		let provider = dark_oracle_updater.provider();
+		let meta = loop {
+			let (tx_hash, meta) = match dark_oracle_updater.disable_asset(asset_symbol).await {
+				Ok(ok) => ok,
+				Err(e) => {
+					error!(
+						"Failed to submit disable tx for {}: {:?}, retrying",
+						asset_symbol, e
+					);
+					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
+					continue;
+				}
+			};
+
+			match tx_processor::confirm_tx(provider.clone(), TxKind::DisableAsset, tx_hash).await {
+				ConfirmOutcome::Confirmed => break meta,
+				ConfirmOutcome::Reverted => {
+					warn!(
+						"Disable tx for {} reverted on-chain, resubmitting",
+						asset_symbol
+					);
+					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
+				}
+				ConfirmOutcome::RpcError => {
+					warn!(
+						"RPC error confirming disable tx for {}, resubmitting",
+						asset_symbol
+					);
+					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
 				}
 			}
-			Err(e) => {
-				error!("Failed to disable asset {}: {:?}", asset_symbol, e);
-				*missing_data = true;
-			}
+		};
+
+		let mut disabled_guard = disabled_assets.lock().await;
+		disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Disabled(meta));
+		if let Some(last_tf) = last_price {
+			currencies_to_feed.push(last_tf);
+		} else {
+			error!("No last price available for token: {}", asset_symbol);
+			*missing_data = true;
 		}
 	} else {
 		// Either already disabled, or still under the failure threshold:
@@ -263,6 +293,7 @@ pub async fn run_feed_loop(
 	info!("Starting feed loop");
 
 	let disabled_assets = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, AssetStatus>::new()));
+	let hierarchy = ProviderHierarchy::default();
 
 	loop {
 		let start = tokio::time::Instant::now();
@@ -283,7 +314,6 @@ pub async fn run_feed_loop(
 
 		let mut currencies_to_feed = vec![];
 		let mut missing_data = false;
-		let hierarchy = ProviderHierarchy::default();
 
 		for asset in &supported_currencies {
 			let asset_hierarchy = hierarchy

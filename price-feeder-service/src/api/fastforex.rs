@@ -98,10 +98,15 @@ impl FastForexClient {
 	) -> Result<FastForexResponse, FastForexError> {
 		let client = reqwest::Client::new();
 		let pairs_str = pairs.join(",");
-		let url = format!("{}/fx/quote?pairs={}&api_key={}", self.host, pairs_str, self.api_key);
+		let url = reqwest::Url::parse_with_params(
+			&format!("{}/fx/quote", self.host),
+			&[("pairs", &pairs_str)],
+		)
+		.map_err(|e| FastForexError(format!("Failed to build URL: {}", e)))?;
 
 		let response = client
-			.get(&url)
+			.get(url)
+			.header("X-API-KEY", &self.api_key)
 			.send()
 			.await
 			.map_err(|e| FastForexError(format!("Failed to send request: {}", e)))?;

@@ -2,6 +2,7 @@ use alloy::{
 	primitives::B256,
 	providers::{Provider, ProviderBuilder},
 	rpc::types::TransactionReceipt,
+	transports::Transport,
 };
 use log::{error, info};
 use reqwest::Url;
@@ -16,6 +17,7 @@ use crate::price_updater::alerts;
 pub enum UpdateTxKind {
 	DarkOracle,
 	Pyth,
+	DisableAsset,
 }
 
 impl fmt::Display for UpdateTxKind {
@@ -23,8 +25,16 @@ impl fmt::Display for UpdateTxKind {
 		match self {
 			UpdateTxKind::DarkOracle => write!(f, "DarkOracle"),
 			UpdateTxKind::Pyth => write!(f, "Pyth"),
+			UpdateTxKind::DisableAsset => write!(f, "DisableAsset"),
 		}
 	}
+}
+
+#[derive(Debug)]
+pub enum ConfirmOutcome {
+	Confirmed,
+	Reverted,
+	RpcError,
 }
 
 pub struct UpdateTx {
@@ -43,13 +53,19 @@ pub async fn run_tx_processor(mut rx: mpsc::Receiver<UpdateTx>) {
 
 	while let Some(tx) = rx.recv().await {
 		let provider = Arc::clone(&provider);
-		tokio::spawn(async move { confirm_tx(provider, tx.kind, tx.tx_hash).await });
+		tokio::spawn(async move {
+			let _ = confirm_tx(provider, tx.kind, tx.tx_hash).await;
+		});
 	}
 }
 
-async fn confirm_tx<P>(provider: Arc<P>, kind: UpdateTxKind, tx_hash: B256)
+/// Polls for a transaction receipt until it is mined, reverts, or the RPC errors.
+/// Slack alerts are emitted for revert / RPC failure cases. The caller decides
+/// what to do with the outcome (e.g. resubmit on `Reverted` / `RpcError`).
+pub async fn confirm_tx<P, T>(provider: Arc<P>, kind: UpdateTxKind, tx_hash: B256) -> ConfirmOutcome
 where
-	P: Provider + ?Sized,
+	P: Provider<T> + ?Sized,
+	T: Transport + Clone,
 {
 	loop {
 		match provider.get_transaction_receipt(tx_hash).await {
@@ -59,10 +75,11 @@ where
 						"[{}] transaction confirmed: tx_hash={:?}, block={:?}",
 						kind, receipt.transaction_hash, receipt.block_number,
 					);
+					return ConfirmOutcome::Confirmed;
 				} else {
 					on_tx_reverted(kind, &receipt).await;
+					return ConfirmOutcome::Reverted;
 				}
-				break;
 			},
 			Ok(None) => {
 				// Transaction not yet mined, wait and poll again
@@ -70,7 +87,7 @@ where
 			},
 			Err(e) => {
 				on_tx_error(kind, Box::new(e)).await;
-				break;
+				return ConfirmOutcome::RpcError;
 			},
 		}
 	}

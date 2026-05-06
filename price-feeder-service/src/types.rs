@@ -11,6 +11,7 @@ pub enum Aggregator {
 	Coingecko,
 	Binance,
 	Pyth,
+	#[serde(rename = "fastforex")]
 	FastForex,
 	Custom(String),
 }

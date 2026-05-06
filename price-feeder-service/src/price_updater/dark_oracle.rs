@@ -56,6 +56,12 @@ impl DarkOracleUpdater {
 		self.update_interval
 	}
 
+	/// Shared provider handle, used to await tx confirmations off the
+	/// fire-and-forget channel (e.g. when blocking the feed loop on a disable tx).
+	pub fn provider(&self) -> Arc<ChainProvider> {
+		self.client.provider.clone()
+	}
+
 	pub async fn fetch_asset_meta(
 		&self,
 		asset_addr: Address,
@@ -75,7 +81,8 @@ impl DarkOracleUpdater {
 		symbol: &str,
 	) -> Result<(B256, AssetMetadata), Box<dyn Error + Send + Sync + 'static>> {
 		info!("Disabling DarkOracle contract asset {}...", symbol);
-		let asset_addr = configs::get_asset_address(symbol).ok_or("Asset address not found in config")?;
+		let asset_addr = configs::get_asset_address(symbol)
+			.ok_or_else(|| format!("Asset address not found for symbol: {}", symbol))?;
 
 		let meta = self.fetch_asset_meta(asset_addr).await?;
 
@@ -84,7 +91,7 @@ impl DarkOracleUpdater {
 			.oracle
 			.unregisterAsset(asset_addr)
 			.gas(500_000)
-			.max_priority_fee_per_gas(priority_fee * 7);
+			.max_priority_fee_per_gas(priority_fee * 10); // Extra priority fee for unregistering assets, as it blocks everything else.
 
 		let tx_hash = self
 			.client
