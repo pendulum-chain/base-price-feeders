@@ -1,5 +1,6 @@
 pub mod alerts;
 pub mod chain;
+pub mod configs;
 pub mod dark_oracle;
 pub mod helpers;
 pub mod pyth;
@@ -24,37 +25,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tx_processor::{UpdateTx as Tx, UpdateTxKind as TxKind};
 
-#[derive(Debug, Clone)]
-pub struct ProviderHierarchy {
-	pub default: Vec<Aggregator>,
-	pub per_asset: std::collections::HashMap<String, Vec<Aggregator>>,
-}
-
-// Default hierarchy: Binance > Nothing for BRL/BRLA,
-// Coinbase > Coingecko > Pyth for everything else.
-impl Default for ProviderHierarchy {
-	fn default() -> Self {
-		let mut per_asset = std::collections::HashMap::new();
-		per_asset.insert(
-			"BRLA".to_string(),
-			vec![Aggregator::Binance],
-		);
-		per_asset.insert(
-			"BRL".to_string(),
-			vec![Aggregator::Binance],
-		);
-
-		per_asset.insert(
-			"EURC".to_string(),
-			vec![Aggregator::FastForex, Aggregator::Coinbase, Aggregator::Coingecko, Aggregator::Pyth],
-		);
-
-		Self {
-			default: vec![Aggregator::Coinbase, Aggregator::Coingecko, Aggregator::Pyth],
-			per_asset,
-		}
-	}
-}
+pub use configs::ProviderHierarchy;
 
 // Number of consecutive hierarchy-exhausted occurrences before we send the
 // disable tx on-chain. Anything below this threshold is considered transient.
@@ -118,6 +89,7 @@ async fn handle_asset_exhausted(
 	dark_oracle_updater: &DarkOracleUpdater,
 	currencies_to_feed: &mut Vec<CoinInfo>,
 	missing_data: &mut bool,
+	hierarchy: &ProviderHierarchy,
 ) {
 	let asset_symbol = asset.symbol.as_str();
 	// Look up the most recent (but stale) price across the hierarchy.
@@ -131,36 +103,40 @@ async fn handle_asset_exhausted(
 	});
 
 	let should_send_disable = {
-		let mut disabled_guard = disabled_assets.lock().await;
-		match disabled_guard.get(asset_symbol) {
-			Some(AssetStatus::Disabled(_)) => false,
-			// Mid-flight enable: the feed has dropped again, so we need to
-			// send a fresh disable tx
-			Some(AssetStatus::Enabling(_)) => true,
-			Some(AssetStatus::Failing(count)) => {
-				let next = count.saturating_add(1);
-				if next >= DISABLE_FAILURE_THRESHOLD {
-					true
-				} else {
-					info!(
-						"Hierarchy exhausted for {} ({}/{}), deferring disable",
-						asset_symbol, next, DISABLE_FAILURE_THRESHOLD
-					);
-					disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(next));
-					false
+		if !hierarchy.disable_on_exhaustion.get(asset_symbol).cloned().unwrap_or(false) {
+			false
+		} else {
+			let mut disabled_guard = disabled_assets.lock().await;
+			match disabled_guard.get(asset_symbol) {
+				Some(AssetStatus::Disabled(_)) => false,
+				// Mid-flight enable: the feed has dropped again, so we need to
+				// send a fresh disable tx
+				Some(AssetStatus::Enabling(_)) => true,
+				Some(AssetStatus::Failing(count)) => {
+					let next = count.saturating_add(1);
+					if next >= DISABLE_FAILURE_THRESHOLD {
+						true
+					} else {
+						info!(
+							"Hierarchy exhausted for {} ({}/{}), deferring disable",
+							asset_symbol, next, DISABLE_FAILURE_THRESHOLD
+						);
+						disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(next));
+						false
+					}
 				}
-			}
-			// First failure for this asset.
-			None => {
-				if DISABLE_FAILURE_THRESHOLD <= 1 {
-					true
-				} else {
-					info!(
-						"Hierarchy exhausted for {} (1/{}), deferring disable",
-						asset_symbol, DISABLE_FAILURE_THRESHOLD
-					);
-					disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(1));
-					false
+				// First failure for this asset.
+				None => {
+					if DISABLE_FAILURE_THRESHOLD <= 1 {
+						true
+					} else {
+						info!(
+							"Hierarchy exhausted for {} (1/{}), deferring disable",
+							asset_symbol, DISABLE_FAILURE_THRESHOLD
+						);
+						disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(1));
+						false
+					}
 				}
 			}
 		}
@@ -349,6 +325,7 @@ pub async fn run_feed_loop(
 					&dark_oracle_updater,
 					&mut currencies_to_feed,
 					&mut missing_data,
+					&hierarchy,
 				).await;
 			}
 		}

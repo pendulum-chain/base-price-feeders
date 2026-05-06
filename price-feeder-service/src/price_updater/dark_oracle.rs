@@ -9,6 +9,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use super::chain::{ChainClient, ChainProvider, HttpTransport, PriceData};
+use super::configs;
 use crate::types::CoinInfo;
 
 sol! {
@@ -55,16 +56,6 @@ impl DarkOracleUpdater {
 		self.update_interval
 	}
 
-	fn get_asset_address(&self, symbol: &str) -> Option<Address> {
-		let raw = match symbol {
-			"USDC" => Some("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
-			"EURC" => Some("0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42"),
-			"BRL" | "BRLA" => Some("0xfCB34c47f850f452C15EA1B84d51231C38A61783"),
-			_ => None,
-		}?;
-		raw.parse::<Address>().ok()
-	}
-
 	pub async fn fetch_asset_meta(
 		&self,
 		asset_addr: Address,
@@ -84,7 +75,7 @@ impl DarkOracleUpdater {
 		symbol: &str,
 	) -> Result<(B256, AssetMetadata), Box<dyn Error + Send + Sync + 'static>> {
 		info!("Disabling DarkOracle contract asset {}...", symbol);
-		let asset_addr = self.get_asset_address(symbol).ok_or("Asset address not found in config")?;
+		let asset_addr = configs::get_asset_address(symbol).ok_or("Asset address not found in config")?;
 
 		let meta = self.fetch_asset_meta(asset_addr).await?;
 
