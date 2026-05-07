@@ -17,6 +17,7 @@ use crate::storage::CoinInfoStorage;
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
 use alloy::primitives::B256;
+use configs::HierarchyEntry;
 use helpers::{convert_to_coin_info, BIPS_DIVISOR};
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
@@ -86,7 +87,7 @@ async fn handle_asset_recovery(
 
 async fn handle_asset_exhausted(
 	asset: &AssetSpecifier,
-	asset_hierarchy: &[Aggregator],
+	asset_hierarchy: &[HierarchyEntry],
 	storage: &CoinInfoStorage,
 	disabled_assets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, AssetStatus>>>,
 	dark_oracle_updater: &DarkOracleUpdater,
@@ -96,7 +97,8 @@ async fn handle_asset_exhausted(
 ) {
 	let asset_symbol = asset.symbol.as_str();
 	// Look up the most recent (but stale) price across the hierarchy.
-	let last_price = asset_hierarchy.iter().find_map(|aggregator| {
+	let last_price = asset_hierarchy.iter().find_map(|entry| {
+		let aggregator = &entry.aggregator;
 		let blockchain = if *aggregator == Aggregator::Pyth {
 			"unknown"
 		} else {
@@ -315,14 +317,15 @@ pub async fn run_feed_loop(
 		let mut currencies_to_feed = vec![];
 		let mut missing_data = false;
 
+		let now = chrono::Utc::now();
+
 		for asset in &supported_currencies {
 			let asset_hierarchy = hierarchy
-				.per_asset
-				.get(&asset.symbol)
-				.unwrap_or(&hierarchy.default);
+				.get_hierarchy(&asset.symbol, now);
 
 			let mut selected_tf = None;
-			for aggregator in asset_hierarchy {
+			for entry in &asset_hierarchy {
+				let aggregator = &entry.aggregator;
 				let blockchain = if *aggregator == Aggregator::Pyth {
 					"unknown"
 				} else {
@@ -349,7 +352,7 @@ pub async fn run_feed_loop(
 				// No price found anywhere in the hierarchy
 				handle_asset_exhausted(
 					asset,
-					asset_hierarchy,
+					&asset_hierarchy,
 					&storage,
 					disabled_assets.clone(),
 					&dark_oracle_updater,
