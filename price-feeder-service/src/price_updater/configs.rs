@@ -2,6 +2,8 @@ use crate::types::Aggregator;
 use alloy::primitives::Address;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike, Utc, Weekday};
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
 
 // ── Time window ───────────────────────────────────────────────────────────────
 
@@ -90,7 +92,59 @@ pub struct ProviderHierarchy {
 	pub disable_on_exhaustion: HashMap<String, bool>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProviderHierarchyError {
+	message: String,
+}
+
+impl ProviderHierarchyError {
+	fn invalid_timezone_offset(asset_symbol: &str, aggregator: Aggregator, offset: &str) -> Self {
+		Self {
+			message: format!(
+				"invalid timezone offset '{offset}' for asset '{asset_symbol}' and aggregator '{aggregator}' (expected +HH:MM or -HH:MM)"
+			),
+		}
+	}
+}
+
+impl fmt::Display for ProviderHierarchyError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.message)
+	}
+}
+
+impl Error for ProviderHierarchyError {}
+
 impl ProviderHierarchy {
+	pub fn validate(&self) -> Result<(), ProviderHierarchyError> {
+		for entry in &self.default {
+			if let Some(window) = &entry.window {
+				if parse_utc_offset(&window.timezone_offset).is_none() {
+					return Err(ProviderHierarchyError::invalid_timezone_offset(
+						"default",
+						entry.aggregator.clone(),
+						&window.timezone_offset,
+					));
+				}
+			}
+		}
+
+		for (asset_symbol, entries) in &self.per_asset {
+			for entry in entries {
+				if let Some(window) = &entry.window {
+					if parse_utc_offset(&window.timezone_offset).is_none() {
+						return Err(ProviderHierarchyError::invalid_timezone_offset(
+							asset_symbol,
+							entry.aggregator.clone(),
+							&window.timezone_offset,
+						));
+					}
+				}
+			}
+		}
+
+		Ok(())
+	}
 
 	/// Returns the hierarchy for `asset_symbol`, keeping only entries whose
 	/// [`TimeWindow`] (if any) contains `now`. 
@@ -125,7 +179,7 @@ impl Default for ProviderHierarchy {
 					end_day: Weekday::Fri,
 					end_hour: 22,
 					end_minute: 0,
-					timezone_offset: "00:00".to_string(),
+					timezone_offset: "+00:00".to_string(),
 				},
 			),
 			HierarchyEntry::new(Aggregator::Coinbase),
