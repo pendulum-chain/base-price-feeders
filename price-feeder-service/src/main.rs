@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::price_updater::{
 	alerts, chain::ChainClient, tx_processor, DarkOracleUpdater, PriceDivergenceAlert,
-	PythPriceUpdater, UpdateTx,
+	ProviderHierarchy, PythPriceUpdater, UpdateTx,
 };
 
 mod api;
@@ -51,6 +51,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		error!("No supported currencies provided. Exiting.");
 		return Ok(());
 	}
+
+	let hierarchy = ProviderHierarchy::default();
+	hierarchy.validate()?;
 
 	let update_interval_seconds = args.update_interval_seconds;
 	let pyth_update_interval_seconds = args.pyth_update_interval_seconds;
