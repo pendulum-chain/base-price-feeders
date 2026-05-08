@@ -147,13 +147,12 @@ impl ProviderHierarchy {
 	}
 
 	/// Returns the hierarchy for `asset_symbol`, keeping only entries whose
-	/// [`TimeWindow`] (if any) contains `now`. 
-	pub fn get_hierarchy(&self, asset_symbol: &str, now: DateTime<Utc>) -> Vec<HierarchyEntry> {
+	/// [`TimeWindow`] (if any) contains `now`.
+	pub fn get_hierarchy(&self, asset_symbol: &str, now: DateTime<Utc>) -> Vec<&HierarchyEntry> {
 		let entries = self.per_asset.get(asset_symbol).unwrap_or(&self.default);
 		entries
 			.iter()
 			.filter(|entry| entry.window.as_ref().map_or(true, |w| w.contains(now)))
-			.cloned()
 			.collect()
 	}
 }

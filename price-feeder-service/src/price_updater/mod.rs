@@ -87,7 +87,7 @@ async fn handle_asset_recovery(
 
 async fn handle_asset_exhausted(
 	asset: &AssetSpecifier,
-	asset_hierarchy: &[HierarchyEntry],
+	asset_hierarchy: Vec<&HierarchyEntry>,
 	storage: &CoinInfoStorage,
 	disabled_assets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, AssetStatus>>>,
 	dark_oracle_updater: &DarkOracleUpdater,
@@ -97,7 +97,7 @@ async fn handle_asset_exhausted(
 ) {
 	let asset_symbol = asset.symbol.as_str();
 	// Look up the most recent (but stale) price across the hierarchy.
-	let last_price = asset_hierarchy.iter().find_map(|entry| {
+	let last_price = asset_hierarchy.into_iter().find_map(|entry| {
 		let aggregator = &entry.aggregator;
 		let blockchain = if *aggregator == Aggregator::Pyth {
 			"unknown"
@@ -352,7 +352,7 @@ pub async fn run_feed_loop(
 				// No price found anywhere in the hierarchy
 				handle_asset_exhausted(
 					asset,
-					&asset_hierarchy,
+					asset_hierarchy,
 					&storage,
 					disabled_assets.clone(),
 					&dark_oracle_updater,
