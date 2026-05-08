@@ -176,7 +176,7 @@ impl Default for ProviderHierarchy {
 					start_hour: 22,
 					start_minute: 0,
 					end_day: Weekday::Fri,
-					end_hour: 22,
+					end_hour: 21,
 					end_minute: 0,
 					timezone_offset: "+00:00".to_string(),
 				},
