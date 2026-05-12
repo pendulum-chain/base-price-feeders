@@ -23,7 +23,7 @@ use log::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::error::Error;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tx_processor::{ConfirmOutcome, UpdateTx as Tx, UpdateTxKind as TxKind};
 
 pub use configs::ProviderHierarchy;
@@ -206,80 +206,135 @@ async fn handle_asset_exhausted(
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
+pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(500);// TODO "play" with this value\
+// in theory setting it to 0, and using a 1 multiplier in the storage should error all the feeds.
+
+pub const FETCH_WATCHDOG_MIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The fetch loop runs **on demand**: it sleeps until either
+///   1. the feed loop signals via `fetch_trigger` (the normal case, scheduled
+///      to fire `FETCH_LEAD_TIME` before each feed tick), or
+///   2. the watchdog timeout elapses (defensive — should not happen in
+///      steady state).
+///
+/// On a successful fetch (no provider errored) it goes back to sleep. On
+/// **any** provider error it retries immediately without waiting for the
+/// next trigger, until either the fetch succeeds or a new trigger arrives.
 pub async fn run_fetch_loop<T>(
 	storage: Arc<CoinInfoStorage>,
 	supported_currencies: HashSet<AssetSpecifier>,
 	update_interval: std::time::Duration,
+	fetch_trigger: Arc<Notify>,
 	api: T,
 	_update_tx: mpsc::Sender<UpdateTx>,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>>
 where
 	T: PriceApi + Send + Sync + 'static,
 {
-	info!("Starting fetch loop");
+	info!("Starting fetch loop (trigger-gated, watchdog={:?})", update_interval * 2);
+
+	let _ = run_single_fetch(&storage, &supported_currencies, &api).await;
+
+	let watchdog = std::cmp::max(FETCH_WATCHDOG_MIN, update_interval * 2);
 
 	loop {
-		let start = tokio::time::Instant::now();
-
-		let assets_refs: Vec<&AssetSpecifier> = supported_currencies.iter().collect();
-		let storage_pyth = storage.clone();
-
-		let quotations_future = async {
-			let quotations = api.get_quotations(assets_refs).await;
-			for q in quotations {
-				match convert_to_coin_info(q.clone()) {
-					Ok(ci) => {
-						storage.update_timeframe(ci);
-					},
-					Err(e) => error!("Error converting to CoinInfo: {:#?}", e),
-				}
+		// Wait for either the feed loop's trigger or the watchdog.
+		tokio::select! {
+			_ = fetch_trigger.notified() => {
+				debug!("Fetch loop woken by feed trigger");
 			}
-		};
-
-		// Fetch Pyth prices. Purely for storage update as coinbase/coingecko final backups.
-		let pyth_future = async {
-			match pyth::fetch_pyth_prices(&supported_currencies).await {
-				Ok((_data, price_data)) => {
-					let time = chrono::Utc::now().timestamp().unsigned_abs();
-
-					let update_pyth = |symbol: &str, price: f64| {
-						let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
-						storage_pyth.update_timeframe(CoinInfo {
-							symbol: symbol.into(),
-							name: symbol.into(),
-							blockchain: "unknown".into(),
-							supply: 0,
-							last_update_timestamp: time,
-							price: (price * scale) as u128,
-							provider: Aggregator::Pyth,
-						});
-					};
-
-					for (symbol, price) in &price_data.prices {
-						update_pyth(symbol, *price);
-					}
-				},
-				Err(e) => {
-					error!("Failed to fetch Pyth prices in fetch loop: {:?}", e);
-				},
+			_ = tokio::time::sleep(watchdog) => {
+				warn!("Fetch loop watchdog fired ({:?}); no trigger received", watchdog);
 			}
-		};
-
-		tokio::join!(quotations_future, pyth_future);
-
-		debug!("Storage state after fetch loop iteration:");
-		for (key, tf) in storage.timeframes.read().unwrap().iter() {
-			debug!(
-				"{}: {} (provider: {:?}) (timestamp: {})",
-				key, tf.price, tf.provider, tf.last_update_timestamp
-			);
 		}
 
-		let elapsed = start.elapsed();
-		if elapsed < update_interval {
-			tokio::time::sleep(update_interval - elapsed).await;
+		// Run fetches; on any provider error, retry immediately without
+		// waiting for the next trigger.
+		loop {
+			let had_error = run_single_fetch(&storage, &supported_currencies, &api).await;
+			if !had_error {
+				break;
+			}
+			warn!("Fetch loop encountered a provider error; retrying immediately");
+			//  avoid pegging a CPU on a hard-down provider.
+			tokio::task::yield_now().await;
 		}
 	}
+}
+
+async fn run_single_fetch<T>(
+	storage: &Arc<CoinInfoStorage>,
+	supported_currencies: &HashSet<AssetSpecifier>,
+	api: &T,
+) -> bool
+where
+	T: PriceApi + Send + Sync + 'static,
+{
+	let start = tokio::time::Instant::now();
+
+	let assets_refs: Vec<&AssetSpecifier> = supported_currencies.iter().collect();
+	let storage_pyth = storage.clone();
+
+	let quotations_future = async {
+		let outcome = api.get_quotations(assets_refs).await;
+		for q in outcome.quotations {
+			match convert_to_coin_info(q.clone()) {
+				Ok(ci) => {
+					storage.update_timeframe(ci);
+				},
+				Err(e) => error!("Error converting to CoinInfo: {:#?}", e),
+			}
+		}
+		outcome.had_error
+	};
+
+	// Fetch Pyth prices. Purely for storage update as coinbase/coingecko final backups.
+	let pyth_future = async {
+		match pyth::fetch_pyth_prices(supported_currencies).await {
+			Ok((_data, price_data)) => {
+				let time = chrono::Utc::now().timestamp().unsigned_abs();
+
+				let update_pyth = |symbol: &str, price: f64| {
+					let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
+					storage_pyth.update_timeframe(CoinInfo {
+						symbol: symbol.into(),
+						name: symbol.into(),
+						blockchain: "unknown".into(),
+						supply: 0,
+						last_update_timestamp: time,
+						price: (price * scale) as u128,
+						provider: Aggregator::Pyth,
+					});
+				};
+
+				for (symbol, price) in &price_data.prices {
+					update_pyth(symbol, *price);
+				}
+				false
+			},
+			Err(e) => {
+				error!("Failed to fetch Pyth prices in fetch loop: {:?}", e);
+				true
+			},
+		}
+	};
+
+	let (quotations_err, pyth_err) = tokio::join!(quotations_future, pyth_future);
+
+	debug!(
+		"Storage state after fetch ({:?}, quotations_err={}, pyth_err={}):",
+		start.elapsed(),
+		quotations_err,
+		pyth_err,
+	);
+	for (key, tf) in storage.timeframes.read().unwrap().iter() {
+		debug!(
+			"{}: {} (provider: {:?}) (timestamp: {})",
+			key, tf.price, tf.provider, tf.last_update_timestamp
+		);
+	}
+
+	quotations_err || pyth_err
 }
 
 pub async fn run_feed_loop(
@@ -291,14 +346,21 @@ pub async fn run_feed_loop(
 	update_tx: mpsc::Sender<UpdateTx>,
 	mut pyth_updater: PythPriceUpdater,
 	pyth_client: Arc<ChainClient>,
+	fetch_trigger: Arc<Notify>,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 	info!("Starting feed loop");
 
 	let disabled_assets = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, AssetStatus>::new()));
 	let hierarchy = ProviderHierarchy::default();
+	let update_interval = dark_oracle_updater.get_update_interval();
 
 	loop {
 		let start = tokio::time::Instant::now();
+		let next_tick = start + update_interval;
+
+		// Schedule the fetch trigger to fire just before the *next* feed
+		// tick.
+		schedule_fetch_trigger(fetch_trigger.clone(), next_tick, FETCH_LEAD_TIME);
 
 		let pyth_future = async {
 			match pyth_updater.run_update(pyth_client.clone(), &supported_currencies).await {
@@ -422,12 +484,27 @@ pub async fn run_feed_loop(
 		};
 
 		tokio::join!(pyth_future, dark_oracle_future);
-		let update_interval = dark_oracle_updater.get_update_interval();
 		let elapsed = start.elapsed();
 		if elapsed < update_interval {
 			tokio::time::sleep(update_interval - elapsed).await;
 		}
 	}
+}
+
+/// Spawns a tiny task that fires `trigger.notify_one()` at
+/// `next_tick - lead_time`. If `lead_time >= time_until_next_tick` (i.e. the
+/// previous fetch ran long), the trigger fires immediately so the fetch
+/// loop has a chance to refresh before the next feed tick.
+fn schedule_fetch_trigger(
+	trigger: Arc<Notify>,
+	next_tick: tokio::time::Instant,
+	lead_time: std::time::Duration,
+) {
+	tokio::spawn(async move {
+		let wake_at = next_tick.checked_sub(lead_time).unwrap_or_else(tokio::time::Instant::now);
+		tokio::time::sleep_until(wake_at).await;
+		trigger.notify_one();
+	});
 }
 
 /// Forwards a transaction hash to the tx_processor channel via `try_send`.
