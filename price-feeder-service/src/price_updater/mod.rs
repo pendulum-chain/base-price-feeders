@@ -206,8 +206,9 @@ async fn handle_asset_exhausted(
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
-pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(500);// TODO "play" with this value\
+pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(1_500);// TODO "play" with this value\
 // in theory setting it to 0, and using a 1 multiplier in the storage should error all the feeds.
+// Should probably be the average.
 
 pub const FETCH_WATCHDOG_MIN: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -241,7 +242,7 @@ where
 		// Wait for either the feed loop's trigger or the watchdog.
 		tokio::select! {
 			_ = fetch_trigger.notified() => {
-				debug!("Fetch loop woken by feed trigger");
+				info!("Fetch loop woken by feed trigger");
 			}
 			_ = tokio::time::sleep(watchdog) => {
 				warn!("Fetch loop watchdog fired ({:?}); no trigger received", watchdog);
@@ -251,7 +252,9 @@ where
 		// Run fetches; on any provider error, retry immediately without
 		// waiting for the next trigger.
 		loop {
+			let fetch_start = tokio::time::Instant::now();
 			let had_error = run_single_fetch(&storage, &supported_currencies, &api).await;
+			info!("Fetch completed in {:?}", fetch_start.elapsed());
 			if !had_error {
 				break;
 			}
@@ -355,8 +358,10 @@ pub async fn run_feed_loop(
 	let update_interval = dark_oracle_updater.get_update_interval();
 
 	loop {
-		let start = tokio::time::Instant::now();
-		let next_tick = start + update_interval;
+		let feed_start = tokio::time::Instant::now();
+		info!("Feed loop tick started");
+		storage.log_average_feed_age();
+		let next_tick = feed_start + update_interval;
 
 		// Schedule the fetch trigger to fire just before the *next* feed
 		// tick.
@@ -484,7 +489,8 @@ pub async fn run_feed_loop(
 		};
 
 		tokio::join!(pyth_future, dark_oracle_future);
-		let elapsed = start.elapsed();
+		let elapsed = feed_start.elapsed();
+		info!("Feed loop tick completed in {:?}", elapsed);
 		if elapsed < update_interval {
 			tokio::time::sleep(update_interval - elapsed).await;
 		}
@@ -503,6 +509,7 @@ fn schedule_fetch_trigger(
 	tokio::spawn(async move {
 		let wake_at = next_tick.checked_sub(lead_time).unwrap_or_else(tokio::time::Instant::now);
 		tokio::time::sleep_until(wake_at).await;
+		info!("Fetch trigger notify fired at {:?}", tokio::time::Instant::now());
 		trigger.notify_one();
 	});
 }

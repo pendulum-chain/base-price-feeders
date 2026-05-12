@@ -1,5 +1,6 @@
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
+use log::info;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -86,5 +87,16 @@ impl CoinInfoStorage {
 	) -> Option<CoinInfo> {
 		let key = format!("{}_{}_{}", token, blockchain, provider);
 		self.timeframes.read().unwrap().get(&key).cloned()
+	}
+
+	pub fn log_average_feed_age(&self) {
+		let map = self.timeframes.read().unwrap();
+		if map.is_empty() {
+			return;
+		}
+		let now = chrono::Utc::now().timestamp().unsigned_abs();
+		let total_age: u64 = map.values().map(|tf| now.saturating_sub(tf.last_update_timestamp)).sum();
+		let avg_age_secs = total_age / map.len() as u64;
+		info!("Average feed age: {}s ({} entries)", avg_age_secs, map.len());
 	}
 }
