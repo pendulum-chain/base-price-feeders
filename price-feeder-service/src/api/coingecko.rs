@@ -60,7 +60,7 @@ impl CoingeckoPriceApi {
 			.filter_map(|(id, price)| {
 				let asset = id_to_asset_map.get(&id)?;
 				let supply = Decimal::ZERO;
-				let time = price.last_updated_at;
+				let time = price.last_updated_at.saturating_mul(1000);
 
 				Some(Quotation {
 					symbol: asset.symbol.clone(),

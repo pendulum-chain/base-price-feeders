@@ -10,7 +10,7 @@ use actix_web::{web, App, HttpServer};
 use clap::Parser;
 use log::{error, info};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::price_updater::{
 	alerts, chain::ChainClient, tx_processor, DarkOracleUpdater, PriceDivergenceAlert,
@@ -30,8 +30,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	dotenv::dotenv().ok();
 
 	let args: DiaApiArgs = DiaApiArgs::parse();
-	let storage = Arc::new(CoinInfoStorage::default());
-	let data = web::Data::from(storage.clone());
+	if args.update_interval_seconds == 0 {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidInput,
+			"update_interval_seconds must be greater than 0",
+		)
+		.into());
+	}
+	let update_interval = std::time::Duration::from_secs(args.update_interval_seconds);
+	let storage = Arc::new(CoinInfoStorage::new(update_interval));
+	let data: web::Data<CoinInfoStorage> = web::Data::from(storage.clone());
 
 	let supported_currencies_vec = args.supported_currencies.0;
 	let supported_currencies: HashSet<AssetSpecifier> = supported_currencies_vec
@@ -55,7 +63,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let hierarchy = ProviderHierarchy::default();
 	hierarchy.validate()?;
 
-	let update_interval_seconds = args.update_interval_seconds;
 	let pyth_update_interval_seconds = args.pyth_update_interval_seconds;
 	let price_divergence_threshold_bp = args.price_divergence_threshold_bp;
 
@@ -80,12 +87,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let pyth_client = Arc::new(ChainClient::new(nonce_manager).await?);
 	let dark_oracle_updater = DarkOracleUpdater::new(
 		dark_oracle_client.clone(),
-		std::time::Duration::from_secs(update_interval_seconds),
+		update_interval,
 	)?;
+
+	let fetch_trigger = Arc::new(Notify::new());
 
 	let fetch_storage = storage.clone();
 	let fetch_currencies = supported_currencies.clone();
 	let fetch_update_tx = update_tx.clone();
+	let fetch_trigger_clone = fetch_trigger.clone();
 	let coingecko_config = args.coingecko.clone();
 	let fastforex_config = args.fastforex.clone();
 	let brl_bps_adjustment = args.brl_bps_adjustment;
@@ -96,7 +106,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		let _ = price_updater::run_fetch_loop(
 			fetch_storage,
 			fetch_currencies,
-			std::time::Duration::from_secs(1),
+			update_interval,
+			fetch_trigger_clone,
 			price_api,
 			fetch_update_tx,
 		)
@@ -117,6 +128,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			update_tx,
 			pyth_updater,
 			pyth_client,
+			fetch_trigger,
 		)
 		.await;
 	});

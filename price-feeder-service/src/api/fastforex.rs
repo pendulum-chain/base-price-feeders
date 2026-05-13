@@ -45,7 +45,7 @@ impl FastForexPriceApi {
 						blockchain: Some(asset.blockchain.clone()),
 						price: mid_price,
 						supply: Decimal::ZERO,
-						time: chrono::Utc::now().timestamp().unsigned_abs(),
+						time: chrono::Utc::now().timestamp_millis() as u64,
 						provider: crate::types::Aggregator::FastForex,
 					};
 					quotations.push(quotation);

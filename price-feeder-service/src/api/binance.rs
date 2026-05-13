@@ -75,7 +75,7 @@ impl BinancePriceApi {
 						blockchain: Some(asset.blockchain.clone()),
 						price: final_price,
 						supply: Decimal::ZERO,
-						time: chrono::Utc::now().timestamp().unsigned_abs(),
+						time: chrono::Utc::now().timestamp_millis() as u64,
 						provider: crate::types::Aggregator::Binance,
 					};
 					quotations.push(quotation);

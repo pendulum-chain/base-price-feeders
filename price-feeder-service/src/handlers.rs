@@ -26,11 +26,12 @@ mod tests {
 
 	fn get_storage() -> Arc<CoinInfoStorage> {
 		let storage = Arc::new(CoinInfoStorage::default());
+		let now = chrono::Utc::now().timestamp_millis() as u64;
 		storage.update_timeframe(
-			CoinInfo { symbol: "BTC".into(), blockchain: "Bitcoin".into(), provider: crate::types::Aggregator::Coinbase, ..Default::default() },
+			CoinInfo { symbol: "BTC".into(), blockchain: "Bitcoin".into(), provider: crate::types::Aggregator::Coinbase, last_update_timestamp: now, ..Default::default() },
 		);
 		storage.update_timeframe(
-			CoinInfo { symbol: "ETH".into(), blockchain: "Ethereum".into(), provider: crate::types::Aggregator::Coinbase, ..Default::default() },
+			CoinInfo { symbol: "ETH".into(), blockchain: "Ethereum".into(), provider: crate::types::Aggregator::Coinbase, last_update_timestamp: now, ..Default::default() },
 		);
 		storage
 	}

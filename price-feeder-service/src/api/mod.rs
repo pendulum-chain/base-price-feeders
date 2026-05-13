@@ -14,9 +14,15 @@ pub mod coingecko;
 pub mod error;
 pub mod fastforex;
 
+#[derive(Debug, Default)]
+pub struct QuotationsOutcome {
+	pub quotations: Vec<Quotation>,
+	pub had_error: bool,
+}
+
 #[async_trait]
 pub trait PriceApi {
-	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> Vec<Quotation>;
+	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> QuotationsOutcome;
 }
 
 pub struct PriceApiImpl {
@@ -39,8 +45,9 @@ impl PriceApiImpl {
 
 #[async_trait]
 impl PriceApi for PriceApiImpl {
-	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> Vec<Quotation> {
+	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> QuotationsOutcome {
 		let mut quotations = Vec::new();
+		let mut had_error = false;
 
 		let binance_assets: Vec<&AssetSpecifier> = assets
 			.iter()
@@ -48,34 +55,17 @@ impl PriceApi for PriceApiImpl {
 			.filter(|asset| BinancePriceApi::is_supported(asset))
 			.collect();
 
-		let binance_quotes = self.get_binance_quotations(binance_assets).await;
-		match binance_quotes {
-			Ok(binance_quotes) => quotations.extend(binance_quotes),
-			Err(e) => log::error!("Error getting Binance quotations: {}", e),
-		}
-
 		let coinbase_assets: Vec<&AssetSpecifier> = assets
 			.iter()
 			.copied()
 			.filter(|asset| CoinbasePriceApi::is_supported(asset))
 			.collect();
 
-		let coinbase_quotes = self.get_coinbase_quotations(coinbase_assets).await;
-		match coinbase_quotes {
-			Ok(coinbase_quotes) => quotations.extend(coinbase_quotes),
-			Err(e) => log::error!("Error getting Coinbase quotations: {}", e),
-		}
-
 		let coingecko_assets: Vec<&AssetSpecifier> = assets
 			.iter()
 			.copied()
 			.filter(|asset| CoingeckoPriceApi::is_supported(asset))
 			.collect();
-		let coingecko_quotes = self.get_coingecko_quotations(coingecko_assets).await;
-		match coingecko_quotes {
-			Ok(coingecko_quotes) => quotations.extend(coingecko_quotes),
-			Err(e) => log::error!("Error getting CoinGecko quotations: {:?}", e),
-		}
 
 		let fastforex_assets: Vec<&AssetSpecifier> = assets
 			.iter()
@@ -83,13 +73,47 @@ impl PriceApi for PriceApiImpl {
 			.filter(|asset| FastForexPriceApi::is_supported(asset))
 			.collect();
 
-		let fastforex_quotes = self.get_fastforex_quotations(fastforex_assets).await;
-		match fastforex_quotes {
-			Ok(fastforex_quotes) => quotations.extend(fastforex_quotes),
-			Err(e) => log::error!("Error getting FastForex quotations: {}", e),
+
+		let (binance_quotes, coinbase_quotes, coingecko_quotes, fastforex_quotes) = tokio::join!(
+			self.get_binance_quotations(binance_assets),
+			self.get_coinbase_quotations(coinbase_assets),
+			self.get_coingecko_quotations(coingecko_assets),
+			self.get_fastforex_quotations(fastforex_assets),
+		);
+
+		match binance_quotes {
+			Ok(binance_quotes) => quotations.extend(binance_quotes),
+			Err(e) => {
+				log::error!("Error getting Binance quotations: {}", e);
+				had_error = true;
+			},
 		}
 
-		quotations
+		match coinbase_quotes {
+			Ok(coinbase_quotes) => quotations.extend(coinbase_quotes),
+			Err(e) => {
+				log::error!("Error getting Coinbase quotations: {}", e);
+				had_error = true;
+			},
+		}
+
+		match coingecko_quotes {
+			Ok(coingecko_quotes) => quotations.extend(coingecko_quotes),
+			Err(e) => {
+				log::error!("Error getting CoinGecko quotations: {:?}", e);
+				had_error = true;
+			},
+		}
+
+		match fastforex_quotes {
+			Ok(fastforex_quotes) => quotations.extend(fastforex_quotes),
+			Err(e) => {
+				log::error!("Error getting FastForex quotations: {}", e);
+				had_error = true;
+			},
+		}
+
+		QuotationsOutcome { quotations, had_error }
 	}
 }
 
