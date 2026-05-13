@@ -30,6 +30,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	dotenv::dotenv().ok();
 
 	let args: DiaApiArgs = DiaApiArgs::parse();
+	if args.update_interval_seconds == 0 {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidInput,
+			"update_interval_seconds must be greater than 0",
+		)
+		.into());
+	}
 	let update_interval = std::time::Duration::from_secs(args.update_interval_seconds);
 	let storage = Arc::new(CoinInfoStorage::new(update_interval));
 	let data: web::Data<CoinInfoStorage> = web::Data::from(storage.clone());
