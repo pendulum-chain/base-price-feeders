@@ -88,10 +88,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let fetch_update_tx = update_tx.clone();
 	let coingecko_config = args.coingecko.clone();
 	let fastforex_config = args.fastforex.clone();
+	let brl_bps_adjustment = args.brl_bps_adjustment;
 
 	tokio::spawn(async move {
 		info!("Starting fetch loop");
-		let price_api = PriceApiImpl::new(coingecko_config, fastforex_config);
+		let price_api = PriceApiImpl::new(coingecko_config, fastforex_config, brl_bps_adjustment);
 		let _ = price_updater::run_fetch_loop(
 			fetch_storage,
 			fetch_currencies,

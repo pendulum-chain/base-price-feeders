@@ -9,12 +9,13 @@ use crate::AssetSpecifier;
 #[derive(Clone)]
 pub struct BinancePriceApi {
 	client: BinanceClient,
+	brl_bps_adjustment: i64,
 }
 
 impl BinancePriceApi {
-	pub fn new() -> Self {
+	pub fn new(brl_bps_adjustment: i64) -> Self {
 		let client = BinanceClient::default();
-		Self { client }
+		Self { client, brl_bps_adjustment }
 	}
 
 	pub async fn get_prices(
@@ -50,6 +51,21 @@ impl BinancePriceApi {
 							log::error!("Cannot invert zero price for {:?}", asset);
 							continue;
 						}
+
+						if self.brl_bps_adjustment != 0 {
+							let bp = Decimal::from(self.brl_bps_adjustment.unsigned_abs());
+							let adjustment = bp * final_price / Decimal::from(10_000u64);
+							if self.brl_bps_adjustment > 0 {
+								final_price = final_price
+									.checked_sub(adjustment)
+									.unwrap_or(final_price);
+							} else {
+								final_price = final_price
+									.checked_add(adjustment)
+									.unwrap_or(final_price);
+							}
+						}
+
 						final_price = Decimal::ONE / final_price;
 					}
 
