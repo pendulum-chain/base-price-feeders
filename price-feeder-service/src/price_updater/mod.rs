@@ -35,6 +35,12 @@ const DISABLE_FAILURE_THRESHOLD: u8 = 3;
 // Backoff between disable-tx resubmissions while we wait for an on-chain
 const DISABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 
+// The longer this value, the "oldest" the price feed at the time of feeding it. But if a fetch cycle 
+// ends up taking longer, we missed the cycle and the feed process uses prices from previous iteration.
+pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+pub const FETCH_WATCHDOG_MIN: std::time::Duration = std::time::Duration::from_secs(2);
+
 // Tracks the state of problematic assets.
 // Note: There is no "Enabled" state because once an asset is successfully
 // enabled on-chain, it is removed from the tracking map entirely.
@@ -206,11 +212,7 @@ async fn handle_asset_exhausted(
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
-pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(1_500);// TODO "play" with this value\
-// in theory setting it to 0, and using a 1 multiplier in the storage should error all the feeds.
-// Should probably be the average.
 
-pub const FETCH_WATCHDOG_MIN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The fetch loop runs **on demand**: it sleeps until either
 ///   1. the feed loop signals via `fetch_trigger` (the normal case, scheduled
@@ -232,7 +234,6 @@ pub async fn run_fetch_loop<T>(
 where
 	T: PriceApi + Send + Sync + 'static,
 {
-	info!("Starting fetch loop (trigger-gated, watchdog={:?})", update_interval * 2);
 
 	let _ = run_single_fetch(&storage, &supported_currencies, &api).await;
 
@@ -253,6 +254,8 @@ where
 		// waiting for the next trigger.
 		loop {
 			let fetch_start = tokio::time::Instant::now();
+			info!("Starting fetch loop (trigger-gated, watchdog)");
+
 			let had_error = run_single_fetch(&storage, &supported_currencies, &api).await;
 			info!("Fetch completed in {:?}", fetch_start.elapsed());
 			if !had_error {
@@ -295,7 +298,7 @@ where
 	let pyth_future = async {
 		match pyth::fetch_pyth_prices(supported_currencies).await {
 			Ok((_data, price_data)) => {
-				let time = chrono::Utc::now().timestamp().unsigned_abs();
+				let time = chrono::Utc::now().timestamp_millis() as u64;
 
 				let update_pyth = |symbol: &str, price: f64| {
 					let scale = 1_000_000_000_000_000_000f64; // 10^18 for price

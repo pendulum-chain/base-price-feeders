@@ -48,7 +48,7 @@ impl CoinbasePriceApi {
 						blockchain: Some(asset.blockchain.clone()),
 						price: price_data.amount,
 						supply: Decimal::ZERO,
-						time: chrono::Utc::now().timestamp().unsigned_abs(),
+						time: chrono::Utc::now().timestamp_millis() as u64,
 						provider: crate::types::Aggregator::Coinbase,
 					};
 					quotations.push(quotation);
