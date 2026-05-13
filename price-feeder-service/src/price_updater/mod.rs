@@ -37,9 +37,8 @@ const DISABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_mil
 
 // The longer this value, the "oldest" the price feed at the time of feeding it. But if a fetch cycle 
 // ends up taking longer, we missed the cycle and the feed process uses prices from previous iteration.
-pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(1_500);
+pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(700);
 
-pub const FETCH_WATCHDOG_MIN: std::time::Duration = std::time::Duration::from_secs(2);
 
 // Tracks the state of problematic assets.
 // Note: There is no "Enabled" state because once an asset is successfully
@@ -214,11 +213,9 @@ async fn handle_asset_exhausted(
 
 
 
-/// The fetch loop runs **on demand**: it sleeps until either
-///   1. the feed loop signals via `fetch_trigger` (the normal case, scheduled
+/// The fetch loop runs **on demand**: it sleeps until either the feed loop signals 
+//       via `fetch_trigger` (the normal case, scheduled
 ///      to fire `FETCH_LEAD_TIME` before each feed tick), or
-///   2. the watchdog timeout elapses (defensive — should not happen in
-///      steady state).
 ///
 /// On a successful fetch (no provider errored) it goes back to sleep. On
 /// **any** provider error it retries immediately without waiting for the
@@ -237,27 +234,17 @@ where
 
 	let _ = run_single_fetch(&storage, &supported_currencies, &api).await;
 
-	let watchdog = std::cmp::max(FETCH_WATCHDOG_MIN, update_interval * 2);
 
 	loop {
-		// Wait for either the feed loop's trigger or the watchdog.
-		tokio::select! {
-			_ = fetch_trigger.notified() => {
-				info!("Fetch loop woken by feed trigger");
-			}
-			_ = tokio::time::sleep(watchdog) => {
-				warn!("Fetch loop watchdog fired ({:?}); no trigger received", watchdog);
-			}
-		}
+
+		fetch_trigger.notified().await;
 
 		// Run fetches; on any provider error, retry immediately without
 		// waiting for the next trigger.
 		loop {
 			let fetch_start = tokio::time::Instant::now();
-			info!("Starting fetch loop (trigger-gated, watchdog)");
 
 			let had_error = run_single_fetch(&storage, &supported_currencies, &api).await;
-			info!("Fetch completed in {:?}", fetch_start.elapsed());
 			if !had_error {
 				break;
 			}
@@ -326,21 +313,10 @@ where
 	};
 
 	let (quotations_err, pyth_err) = tokio::join!(quotations_future, pyth_future);
+	let had_error = quotations_err || pyth_err;
+	debug!("run_single_fetch completed in {:?} (had_error: {})", start.elapsed(), had_error);
 
-	debug!(
-		"Storage state after fetch ({:?}, quotations_err={}, pyth_err={}):",
-		start.elapsed(),
-		quotations_err,
-		pyth_err,
-	);
-	for (key, tf) in storage.timeframes.read().unwrap().iter() {
-		debug!(
-			"{}: {} (provider: {:?}) (timestamp: {})",
-			key, tf.price, tf.provider, tf.last_update_timestamp
-		);
-	}
-
-	quotations_err || pyth_err
+	had_error
 }
 
 pub async fn run_feed_loop(
@@ -362,8 +338,7 @@ pub async fn run_feed_loop(
 
 	loop {
 		let feed_start = tokio::time::Instant::now();
-		info!("Feed loop tick started");
-		storage.log_average_feed_age();
+
 		let next_tick = feed_start + update_interval;
 
 		// Schedule the fetch trigger to fire just before the *next* feed
@@ -373,7 +348,6 @@ pub async fn run_feed_loop(
 		let pyth_future = async {
 			match pyth_updater.run_update(pyth_client.clone(), &supported_currencies).await {
 				Ok((tx_hash_opt, price_data)) => {
-					info!("Pyth prices fetched in feed loop: {:?}", price_data.prices);
 					if let Some(tx_hash) = tx_hash_opt {
 						send_tx(&update_tx, TxKind::Pyth, tx_hash);
 					}
@@ -493,7 +467,7 @@ pub async fn run_feed_loop(
 
 		tokio::join!(pyth_future, dark_oracle_future);
 		let elapsed = feed_start.elapsed();
-		info!("Feed loop tick completed in {:?}", elapsed);
+		debug!("Feed loop tick completed in {:?}", elapsed);
 		if elapsed < update_interval {
 			tokio::time::sleep(update_interval - elapsed).await;
 		}
@@ -512,7 +486,6 @@ fn schedule_fetch_trigger(
 	tokio::spawn(async move {
 		let wake_at = next_tick.checked_sub(lead_time).unwrap_or_else(tokio::time::Instant::now);
 		tokio::time::sleep_until(wake_at).await;
-		info!("Fetch trigger notify fired at {:?}", tokio::time::Instant::now());
 		trigger.notify_one();
 	});
 }

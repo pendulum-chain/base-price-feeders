@@ -1,6 +1,6 @@
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
-use log::info;
+use log::{info, debug};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -79,7 +79,7 @@ impl CoinInfoStorage {
 		let tf = match self.get_timeframe_any(token, blockchain, provider.clone()) {
 			Some(tf) => tf,
 			None => {
-				info!(
+				debug!(
 					"get_timeframe: no entry for {}_{}_{}",
 					token, blockchain, provider
 				);
@@ -90,13 +90,13 @@ impl CoinInfoStorage {
 		let age = now.saturating_sub(tf.last_update_timestamp);
 		let max_age = self.max_entry_age_ms();
 		if age > max_age {
-			info!(
+			debug!(
 				"get_timeframe: rejecting {}_{}_{} - age {}ms > max {}ms",
 				token, blockchain, provider, age, max_age
 			);
 			None
 		} else {
-			info!(
+			debug!(
 				"get_timeframe: accepting {}_{}_{} - age {}ms <= max {}ms",
 				token, blockchain, provider, age, max_age
 			);
@@ -115,14 +115,4 @@ impl CoinInfoStorage {
 		self.timeframes.read().unwrap().get(&key).cloned()
 	}
 
-	pub fn log_average_feed_age(&self) {
-		let map = self.timeframes.read().unwrap();
-		if map.is_empty() {
-			return;
-		}
-		let now = chrono::Utc::now().timestamp_millis() as u64;
-		let total_age: u64 = map.values().map(|tf| now.saturating_sub(tf.last_update_timestamp)).sum();
-		let avg_age_ms = total_age / map.len() as u64;
-		info!("Average feed age: {}ms ({} entries)", avg_age_ms, map.len());
-	}
 }
