@@ -90,16 +90,8 @@ impl CoinInfoStorage {
 		let age = now.saturating_sub(tf.last_update_timestamp);
 		let max_age = self.max_entry_age_ms();
 		if age > max_age {
-			debug!(
-				"get_timeframe: rejecting {}_{}_{} - age {}ms > max {}ms",
-				token, blockchain, provider, age, max_age
-			);
 			None
 		} else {
-			debug!(
-				"get_timeframe: accepting {}_{}_{} - age {}ms <= max {}ms",
-				token, blockchain, provider, age, max_age
-			);
 			Some(tf)
 		}
 	}
