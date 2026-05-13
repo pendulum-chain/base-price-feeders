@@ -18,6 +18,7 @@ pub enum UpdateTxKind {
 	DarkOracle,
 	Pyth,
 	DisableAsset,
+	EnableAsset,
 }
 
 impl fmt::Display for UpdateTxKind {
@@ -26,6 +27,7 @@ impl fmt::Display for UpdateTxKind {
 			UpdateTxKind::DarkOracle => write!(f, "DarkOracle"),
 			UpdateTxKind::Pyth => write!(f, "Pyth"),
 			UpdateTxKind::DisableAsset => write!(f, "DisableAsset"),
+			UpdateTxKind::EnableAsset => write!(f, "EnableAsset"),
 		}
 	}
 }

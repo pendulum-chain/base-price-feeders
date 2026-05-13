@@ -35,6 +35,12 @@ const DISABLE_FAILURE_THRESHOLD: u8 = 3;
 // Backoff between disable-tx resubmissions while we wait for an on-chain
 const DISABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 
+// Maximum number of retries for startup enable tx before giving up
+const STARTUP_ENABLE_MAX_RETRIES: u8 = 3;
+
+// Backoff between startup enable-tx resubmissions
+const STARTUP_ENABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+
 // Tracks the state of problematic assets.
 // Note: There is no "Enabled" state because once an asset is successfully
 // enabled on-chain, it is removed from the tracking map entirely.
@@ -45,6 +51,119 @@ enum AssetStatus {
 	Failing(u8),
 	Disabled(dark_oracle::AssetMetadata),
 	Enabling(dark_oracle::AssetMetadata),
+}
+
+fn should_recover_asset_on_startup(asset_is_registered: bool) -> bool {
+	!asset_is_registered
+}
+
+async fn reconcile_asset_registration_on_startup(
+	asset_symbol: &str,
+	disabled_assets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, AssetStatus>>>,
+	startup_reconciled_assets: Arc<tokio::sync::Mutex<HashSet<String>>>,
+	dark_oracle_updater: &DarkOracleUpdater,
+	hierarchy: &ProviderHierarchy,
+) {
+	if !hierarchy.disable_on_exhaustion.get(asset_symbol).cloned().unwrap_or(false) {
+		return;
+	}
+
+	{
+		let reconciled_guard = startup_reconciled_assets.lock().await;
+		if reconciled_guard.contains(asset_symbol) {
+			return;
+		}
+	}
+
+	let meta = match configs::get_configured_registration_metadata(asset_symbol) {
+		Some(m) => m,
+		None => {
+			warn!(
+				"Skipping startup registration reconciliation for {} because ASSET_REGISTRATION_METADATA has no entry",
+				asset_symbol
+			);
+			startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
+			return;
+		},
+	};
+
+	{
+		let disabled_guard = disabled_assets.lock().await;
+		if disabled_guard.contains_key(asset_symbol) {
+			return;
+		}
+	}
+
+	let is_registered = match dark_oracle_updater.is_asset_registered(asset_symbol).await {
+		Ok(is_registered) => is_registered,
+		Err(e) => {
+			error!("Failed to check registration status for {}: {:?}", asset_symbol, e);
+			return;
+		},
+	};
+
+	if !should_recover_asset_on_startup(is_registered) {
+		startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
+		return;
+	}
+
+	info!(
+		"Recovered feed for untracked disabled asset {}, sending startup enable tx",
+		asset_symbol
+	);
+
+	for attempt in 1..=STARTUP_ENABLE_MAX_RETRIES {
+		let tx_hash = match dark_oracle_updater.enable_asset(asset_symbol, &meta).await {
+			Ok(tx_hash) => tx_hash,
+			Err(e) => {
+				error!(
+					"Failed to enable {} during startup reconciliation (attempt {}/{}): {:?}",
+					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES, e
+				);
+				if attempt < STARTUP_ENABLE_MAX_RETRIES {
+					tokio::time::sleep(STARTUP_ENABLE_RETRY_BACKOFF).await;
+					continue;
+				}
+				error!(
+					"Giving up startup enable for {} after {} attempts",
+					asset_symbol, STARTUP_ENABLE_MAX_RETRIES
+				);
+				startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
+				return;
+			},
+		};
+
+		let provider = dark_oracle_updater.provider();
+		match tx_processor::confirm_tx(provider, TxKind::EnableAsset, tx_hash).await {
+			ConfirmOutcome::Confirmed => {
+				startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
+				info!("Successfully enabled {} during startup reconciliation", asset_symbol);
+				return;
+			},
+			ConfirmOutcome::Reverted => {
+				warn!(
+					"Startup enable tx for {} reverted (attempt {}/{})",
+					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
+				);
+			},
+			ConfirmOutcome::RpcError => {
+				warn!(
+					"RPC error confirming startup enable tx for {} (attempt {}/{})",
+					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
+				);
+			},
+		}
+
+		if attempt < STARTUP_ENABLE_MAX_RETRIES {
+			tokio::time::sleep(STARTUP_ENABLE_RETRY_BACKOFF).await;
+		}
+	}
+
+	error!(
+		"Giving up startup enable for {} after {} attempts, marking as reconciled to avoid spam",
+		asset_symbol, STARTUP_ENABLE_MAX_RETRIES
+	);
+	startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
 }
 
 async fn handle_asset_recovery(
@@ -58,11 +177,12 @@ async fn handle_asset_recovery(
 			// Recover from transient failure.
 			info!("Feed for {} recovered before disable threshold, clearing counter", asset_symbol);
 			disabled_guard.remove(asset_symbol);
-		}
+		},
 		Some(AssetStatus::Disabled(meta)) => {
 			info!("Recovered feed for {}, sending enable tx", asset_symbol);
 			let meta_clone = meta.clone();
-			disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Enabling(meta_clone.clone()));
+			disabled_guard
+				.insert(asset_symbol.to_string(), AssetStatus::Enabling(meta_clone.clone()));
 
 			let symbol_clone = asset_symbol.to_string();
 			let updater_clone = dark_oracle_updater.clone();
@@ -80,8 +200,8 @@ async fn handle_asset_recovery(
 					}
 				}
 			});
-		}
-		_ => {}
+		},
+		_ => {},
 	}
 }
 
@@ -99,11 +219,8 @@ async fn handle_asset_exhausted(
 	// Look up the most recent (but stale) price across the hierarchy.
 	let last_price = asset_hierarchy.into_iter().find_map(|entry| {
 		let aggregator = &entry.aggregator;
-		let blockchain = if *aggregator == Aggregator::Pyth {
-			"unknown"
-		} else {
-			asset.blockchain.as_str()
-		};
+		let blockchain =
+			if *aggregator == Aggregator::Pyth { "unknown" } else { asset.blockchain.as_str() };
 		storage.get_timeframe_any(asset_symbol, blockchain, aggregator.clone())
 	});
 
@@ -129,7 +246,7 @@ async fn handle_asset_exhausted(
 						disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(next));
 						false
 					}
-				}
+				},
 				// First failure for this asset.
 				None => {
 					if DISABLE_FAILURE_THRESHOLD <= 1 {
@@ -142,7 +259,7 @@ async fn handle_asset_exhausted(
 						disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Failing(1));
 						false
 					}
-				}
+				},
 			}
 		}
 	};
@@ -156,31 +273,22 @@ async fn handle_asset_exhausted(
 			let (tx_hash, meta) = match dark_oracle_updater.disable_asset(asset_symbol).await {
 				Ok(ok) => ok,
 				Err(e) => {
-					error!(
-						"Failed to submit disable tx for {}: {:?}, retrying",
-						asset_symbol, e
-					);
+					error!("Failed to submit disable tx for {}: {:?}, retrying", asset_symbol, e);
 					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
 					continue;
-				}
+				},
 			};
 
 			match tx_processor::confirm_tx(provider.clone(), TxKind::DisableAsset, tx_hash).await {
 				ConfirmOutcome::Confirmed => break meta,
 				ConfirmOutcome::Reverted => {
-					warn!(
-						"Disable tx for {} reverted on-chain, resubmitting",
-						asset_symbol
-					);
+					warn!("Disable tx for {} reverted on-chain, resubmitting", asset_symbol);
 					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
-				}
+				},
 				ConfirmOutcome::RpcError => {
-					warn!(
-						"RPC error confirming disable tx for {}, resubmitting",
-						asset_symbol
-					);
+					warn!("RPC error confirming disable tx for {}, resubmitting", asset_symbol);
 					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
-				}
+				},
 			}
 		};
 
@@ -294,7 +402,9 @@ pub async fn run_feed_loop(
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 	info!("Starting feed loop");
 
-	let disabled_assets = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, AssetStatus>::new()));
+	let disabled_assets =
+		Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, AssetStatus>::new()));
+	let startup_reconciled_assets = Arc::new(tokio::sync::Mutex::new(HashSet::<String>::new()));
 	let hierarchy = ProviderHierarchy::default();
 
 	loop {
@@ -320,8 +430,7 @@ pub async fn run_feed_loop(
 		let now = chrono::Utc::now();
 
 		for asset in &supported_currencies {
-			let asset_hierarchy = hierarchy
-				.get_hierarchy(&asset.symbol, now);
+			let asset_hierarchy = hierarchy.get_hierarchy(&asset.symbol, now);
 
 			let mut selected_tf = None;
 			for entry in &asset_hierarchy {
@@ -340,12 +449,22 @@ pub async fn run_feed_loop(
 			}
 
 			if let Some(tf) = selected_tf {
+				reconcile_asset_registration_on_startup(
+					&asset.symbol,
+					disabled_assets.clone(),
+					startup_reconciled_assets.clone(),
+					&dark_oracle_updater,
+					&hierarchy,
+				)
+				.await;
+
 				// We found a price. Check if it was previously disabled.
 				handle_asset_recovery(
 					&asset.symbol,
 					disabled_assets.clone(),
 					dark_oracle_updater.clone(),
-				).await;
+				)
+				.await;
 
 				currencies_to_feed.push(tf);
 			} else {
@@ -359,7 +478,8 @@ pub async fn run_feed_loop(
 					&mut currencies_to_feed,
 					&mut missing_data,
 					&hierarchy,
-				).await;
+				)
+				.await;
 			}
 		}
 
@@ -367,10 +487,7 @@ pub async fn run_feed_loop(
 			if missing_data {
 				error!("Rejecting feeding transaction because at least 1 token is missing data");
 			} else {
-				match dark_oracle_updater
-					.update_prices(&currencies_to_feed)
-					.await
-				{
+				match dark_oracle_updater.update_prices(&currencies_to_feed).await {
 					Ok((tx_hash, price_data)) => {
 						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
 
@@ -403,7 +520,9 @@ pub async fn run_feed_loop(
 									if let Err(e) = divergence_tx.try_send(alert) {
 										match e {
 											mpsc::error::TrySendError::Full(_) => {
-												warn!("Divergence alert channel full — alert dropped");
+												warn!(
+													"Divergence alert channel full — alert dropped"
+												);
 											},
 											mpsc::error::TrySendError::Closed(_) => {
 												error!("Divergence alert channel closed");
@@ -441,5 +560,16 @@ fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 				error!("[{kind}] tx_processor channel closed");
 			},
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn startup_recovery_only_registers_when_asset_is_unregistered() {
+		assert!(should_recover_asset_on_startup(false));
+		assert!(!should_recover_asset_on_startup(true));
 	}
 }
