@@ -271,8 +271,8 @@ mod tests {
 				"BRL": {
 					"asset_address": "0xfCB34c47f850f452C15EA1B84d51231C38A61783",
 					"id": 3,
-					"name": "BRL",
-					"canonical_name": "BRLA",
+					"name": "BRLAUSD",
+					"canonical_name": "BRLAUSD",
 					"price_feed_id": "0xd2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906"
 				}
 			}"#,
@@ -282,8 +282,8 @@ mod tests {
 
 		assert_eq!(brl.asset_address, get_asset_address("BRL").unwrap());
 		assert_eq!(brl.id, 3);
-		assert_eq!(brl.name, "BRL");
-		assert_eq!(brl.canonical_name, "BRLA");
+		assert_eq!(brl.name, "BRLAUSD");
+		assert_eq!(brl.canonical_name, "BRLAUSD");
 	}
 
 	#[test]
@@ -294,8 +294,8 @@ mod tests {
 				"BRLA": {
 					"asset_address": "0xfCB34c47f850f452C15EA1B84d51231C38A61783",
 					"id": 3,
-					"name": "BRL",
-					"canonical_name": "BRLA",
+					"name": "BRLAUSD",
+					"canonical_name": "BRLAUSD",
 					"price_feed_id": "0xd2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906"
 				}
 			}"#,
@@ -314,8 +314,8 @@ mod tests {
 				"BRL": {
 					"asset_address": "0xfCB34c47f850f452C15EA1B84d51231C38A61783",
 					"id": 3,
-					"name": "BRL",
-					"canonical_name": "BRLA",
+					"name": "BRLAUSD",
+					"canonical_name": "BRLAUSD",
 					"price_feed_id": "0xd2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906"
 				}
 			}"#,
