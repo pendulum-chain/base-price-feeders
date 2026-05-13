@@ -49,6 +49,10 @@ pub struct DiaApiArgs {
 	#[clap(long, env = "SLACK_CHANNEL_ID")]
 	pub slack_channel_id: Option<String>,
 
+	/// BRL basis point adjustment (positive = reduce USDC/BRL price, negative = increase)
+	#[clap(long, env = "BRL_BPS_ADJUSTMENT", default_value = "0")]
+	pub brl_bps_adjustment: i64,
+
 	#[clap(flatten)]
 	pub coingecko: CoingeckoConfig,
 

@@ -100,6 +100,16 @@ impl DarkOracleUpdater {
 		Ok((tx_hash, meta))
 	}
 
+	pub async fn is_asset_registered(
+		&self,
+		symbol: &str,
+	) -> Result<bool, Box<dyn Error + Send + Sync + 'static>> {
+		let asset_addr = configs::get_asset_address(symbol)
+			.ok_or_else(|| format!("Asset address not found for symbol: {}", symbol))?;
+		let meta = self.fetch_asset_meta(asset_addr).await?;
+		Ok(meta.asset_address == asset_addr)
+	}
+
 	pub async fn enable_asset(
 		&self,
 		symbol: &str,
@@ -110,7 +120,13 @@ impl DarkOracleUpdater {
 		let priority_fee = self.client.estimate_priority_fee().await?;
 		let call_builder = self
 			.oracle
-			.registerAsset(meta.asset_address, meta.id, meta.name.clone(), meta.canonical_name.clone(), meta.price_feed_id)
+			.registerAsset(
+				meta.asset_address,
+				meta.id,
+				meta.name.clone(),
+				meta.canonical_name.clone(),
+				meta.price_feed_id,
+			)
 			.gas(500_000)
 			.max_priority_fee_per_gas(priority_fee * 7);
 

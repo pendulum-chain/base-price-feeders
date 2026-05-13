@@ -33,9 +33,9 @@ pub struct PriceApiImpl {
 }
 
 impl PriceApiImpl {
-	pub fn new(coingecko_config: CoingeckoConfig, fastforex_config: FastForexConfig) -> Self {
+	pub fn new(coingecko_config: CoingeckoConfig, fastforex_config: FastForexConfig, brl_bps_adjustment: i64) -> Self {
 		Self {
-			binance_price_api: BinancePriceApi::new(),
+			binance_price_api: BinancePriceApi::new(brl_bps_adjustment),
 			coinbase_price_api: CoinbasePriceApi::new(),
 			coingecko_price_api: CoingeckoPriceApi::new_from_config(coingecko_config),
 			fastforex_price_api: FastForexPriceApi::new(fastforex_config),
