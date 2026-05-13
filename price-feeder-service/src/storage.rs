@@ -1,6 +1,6 @@
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
-use log::{info, debug};
+use log::debug;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
