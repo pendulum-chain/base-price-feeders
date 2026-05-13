@@ -35,6 +35,12 @@ const DISABLE_FAILURE_THRESHOLD: u8 = 3;
 // Backoff between disable-tx resubmissions while we wait for an on-chain
 const DISABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 
+// Maximum number of retries for startup enable tx before giving up
+const STARTUP_ENABLE_MAX_RETRIES: u8 = 3;
+
+// Backoff between startup enable-tx resubmissions
+const STARTUP_ENABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+
 // Tracks the state of problematic assets.
 // Note: There is no "Enabled" state because once an asset is successfully
 // enabled on-chain, it is removed from the tracking map entirely.
@@ -47,8 +53,8 @@ enum AssetStatus {
 	Enabling(dark_oracle::AssetMetadata),
 }
 
-fn should_recover_asset_on_startup(feed_is_healthy: bool, asset_is_registered: bool) -> bool {
-	feed_is_healthy && !asset_is_registered
+fn should_recover_asset_on_startup(asset_is_registered: bool) -> bool {
+	!asset_is_registered
 }
 
 async fn reconcile_asset_registration_on_startup(
@@ -69,14 +75,17 @@ async fn reconcile_asset_registration_on_startup(
 		}
 	}
 
-	if configs::get_configured_registration_metadata(asset_symbol).is_none() {
-		warn!(
-			"Skipping startup registration reconciliation for {} because ASSET_REGISTRATION_METADATA has no entry",
-			asset_symbol
-		);
-		startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
-		return;
-	}
+	let meta = match configs::get_configured_registration_metadata(asset_symbol) {
+		Some(m) => m,
+		None => {
+			warn!(
+				"Skipping startup registration reconciliation for {} because ASSET_REGISTRATION_METADATA has no entry",
+				asset_symbol
+			);
+			startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
+			return;
+		},
+	};
 
 	{
 		let disabled_guard = disabled_assets.lock().await;
@@ -93,40 +102,68 @@ async fn reconcile_asset_registration_on_startup(
 		},
 	};
 
-	if !should_recover_asset_on_startup(true, is_registered) {
+	if !should_recover_asset_on_startup(is_registered) {
 		startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
 		return;
 	}
-
-	let Some(meta) = configs::get_configured_registration_metadata(asset_symbol) else {
-		return;
-	};
 
 	info!(
 		"Recovered feed for untracked disabled asset {}, sending startup enable tx",
 		asset_symbol
 	);
-	let tx_hash = match dark_oracle_updater.enable_asset(asset_symbol, &meta).await {
-		Ok(tx_hash) => tx_hash,
-		Err(e) => {
-			error!("Failed to enable {} during startup reconciliation: {:?}", asset_symbol, e);
-			return;
-		},
-	};
 
-	let provider = dark_oracle_updater.provider();
-	match tx_processor::confirm_tx(provider, TxKind::EnableAsset, tx_hash).await {
-		ConfirmOutcome::Confirmed => {
-			startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
-			info!("Successfully enabled {} during startup reconciliation", asset_symbol)
-		},
-		ConfirmOutcome::Reverted => {
-			error!("Startup enable tx for {} reverted on-chain", asset_symbol)
-		},
-		ConfirmOutcome::RpcError => {
-			error!("RPC error confirming startup enable tx for {}", asset_symbol)
-		},
+	for attempt in 1..=STARTUP_ENABLE_MAX_RETRIES {
+		let tx_hash = match dark_oracle_updater.enable_asset(asset_symbol, &meta).await {
+			Ok(tx_hash) => tx_hash,
+			Err(e) => {
+				error!(
+					"Failed to enable {} during startup reconciliation (attempt {}/{}): {:?}",
+					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES, e
+				);
+				if attempt < STARTUP_ENABLE_MAX_RETRIES {
+					tokio::time::sleep(STARTUP_ENABLE_RETRY_BACKOFF).await;
+					continue;
+				}
+				error!(
+					"Giving up startup enable for {} after {} attempts",
+					asset_symbol, STARTUP_ENABLE_MAX_RETRIES
+				);
+				startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
+				return;
+			},
+		};
+
+		let provider = dark_oracle_updater.provider();
+		match tx_processor::confirm_tx(provider, TxKind::EnableAsset, tx_hash).await {
+			ConfirmOutcome::Confirmed => {
+				startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
+				info!("Successfully enabled {} during startup reconciliation", asset_symbol);
+				return;
+			},
+			ConfirmOutcome::Reverted => {
+				warn!(
+					"Startup enable tx for {} reverted (attempt {}/{})",
+					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
+				);
+			},
+			ConfirmOutcome::RpcError => {
+				warn!(
+					"RPC error confirming startup enable tx for {} (attempt {}/{})",
+					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
+				);
+			},
+		}
+
+		if attempt < STARTUP_ENABLE_MAX_RETRIES {
+			tokio::time::sleep(STARTUP_ENABLE_RETRY_BACKOFF).await;
+		}
 	}
+
+	error!(
+		"Giving up startup enable for {} after {} attempts, marking as reconciled to avoid spam",
+		asset_symbol, STARTUP_ENABLE_MAX_RETRIES
+	);
+	startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
 }
 
 async fn handle_asset_recovery(
@@ -531,9 +568,8 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn startup_recovery_only_registers_when_asset_is_unregistered_and_feed_is_healthy() {
-		assert!(should_recover_asset_on_startup(true, false));
-		assert!(!should_recover_asset_on_startup(true, true));
-		assert!(!should_recover_asset_on_startup(false, false));
+	fn startup_recovery_only_registers_when_asset_is_unregistered() {
+		assert!(should_recover_asset_on_startup(false));
+		assert!(!should_recover_asset_on_startup(true));
 	}
 }

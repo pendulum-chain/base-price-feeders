@@ -220,7 +220,17 @@ pub fn get_asset_address(symbol: &str) -> Option<Address> {
 
 pub fn get_configured_registration_metadata(symbol: &str) -> Option<AssetMetadata> {
 	let raw = std::env::var("ASSET_REGISTRATION_METADATA").ok()?;
-	parse_registration_metadata_config(symbol, &raw).ok().flatten()
+	match parse_registration_metadata_config(symbol, &raw) {
+		Ok(meta) => meta,
+		Err(e) => {
+			log::error!(
+				"Failed to parse ASSET_REGISTRATION_METADATA for {}: {:?}",
+				symbol,
+				e
+			);
+			None
+		},
+	}
 }
 
 #[derive(Debug, Deserialize)]
