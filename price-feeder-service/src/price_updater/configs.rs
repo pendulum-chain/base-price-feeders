@@ -1,9 +1,13 @@
 use crate::types::Aggregator;
 use alloy::primitives::Address;
+use alloy::primitives::B256;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike, Utc, Weekday};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+
+use super::dark_oracle::AssetMetadata;
 
 // ── Time window ───────────────────────────────────────────────────────────────
 
@@ -36,9 +40,10 @@ impl TimeWindow {
 		let current = weekday * 24 * 60 + local.hour() * 60 + local.minute();
 
 		let start = self.start_day.num_days_from_monday() * 24 * 60
-			+ self.start_hour * 60 + self.start_minute;
-		let end = self.end_day.num_days_from_monday() * 24 * 60
-			+ self.end_hour * 60 + self.end_minute;
+			+ self.start_hour * 60
+			+ self.start_minute;
+		let end =
+			self.end_day.num_days_from_monday() * 24 * 60 + self.end_hour * 60 + self.end_minute;
 
 		if start <= end {
 			current >= start && current < end
@@ -48,7 +53,6 @@ impl TimeWindow {
 		}
 	}
 }
-
 
 fn parse_utc_offset(s: &str) -> Option<FixedOffset> {
 	let (sign, rest) = if let Some(rest) = s.strip_prefix('-') {
@@ -83,7 +87,6 @@ impl HierarchyEntry {
 		Self { aggregator, window: Some(window) }
 	}
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ProviderHierarchy {
@@ -167,24 +170,27 @@ impl Default for ProviderHierarchy {
 		per_asset.insert("BRLA".to_string(), vec![HierarchyEntry::new(Aggregator::Binance)]);
 		per_asset.insert("BRL".to_string(), vec![HierarchyEntry::new(Aggregator::Binance)]);
 
-		per_asset.insert("EURC".to_string(), vec![
-			// FastForex during Forex market hours (Sun 22:00 → Fri 22:00 UTC)
-			HierarchyEntry::with_window(
-				Aggregator::FastForex,
-				TimeWindow {
-					start_day: Weekday::Sun,
-					start_hour: 22,
-					start_minute: 0,
-					end_day: Weekday::Fri,
-					end_hour: 21,
-					end_minute: 0,
-					timezone_offset: "+00:00".to_string(),
-				},
-			),
-			HierarchyEntry::new(Aggregator::Coinbase),
-			HierarchyEntry::new(Aggregator::Coingecko),
-			HierarchyEntry::new(Aggregator::Pyth),
-		]);
+		per_asset.insert(
+			"EURC".to_string(),
+			vec![
+				// FastForex during Forex market hours (Sun 22:00 → Fri 22:00 UTC)
+				HierarchyEntry::with_window(
+					Aggregator::FastForex,
+					TimeWindow {
+						start_day: Weekday::Sun,
+						start_hour: 22,
+						start_minute: 0,
+						end_day: Weekday::Fri,
+						end_hour: 21,
+						end_minute: 0,
+						timezone_offset: "+00:00".to_string(),
+					},
+				),
+				HierarchyEntry::new(Aggregator::Coinbase),
+				HierarchyEntry::new(Aggregator::Coingecko),
+				HierarchyEntry::new(Aggregator::Pyth),
+			],
+		);
 
 		let mut disable_on_exhaustion = HashMap::new();
 		disable_on_exhaustion.insert("BRLA".to_string(), true);
@@ -210,4 +216,112 @@ pub fn get_asset_address(symbol: &str) -> Option<Address> {
 		_ => None,
 	}?;
 	raw.parse::<Address>().ok()
+}
+
+pub fn get_configured_registration_metadata(symbol: &str) -> Option<AssetMetadata> {
+	let raw = std::env::var("ASSET_REGISTRATION_METADATA").ok()?;
+	parse_registration_metadata_config(symbol, &raw).ok().flatten()
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistrationMetadataConfig {
+	asset_address: String,
+	id: u8,
+	name: String,
+	canonical_name: String,
+	price_feed_id: String,
+}
+
+fn parse_registration_metadata_config(
+	symbol: &str,
+	raw: &str,
+) -> Result<Option<AssetMetadata>, Box<dyn Error + Send + Sync + 'static>> {
+	let metadata_by_symbol: HashMap<String, RegistrationMetadataConfig> =
+		serde_json::from_str(raw)?;
+	let alias = match symbol {
+		"BRL" => Some("BRLA"),
+		"BRLA" => Some("BRL"),
+		_ => None,
+	};
+	let config = metadata_by_symbol
+		.get(symbol)
+		.or_else(|| alias.and_then(|alias| metadata_by_symbol.get(alias)));
+	let Some(config) = config else {
+		return Ok(None);
+	};
+
+	Ok(Some(AssetMetadata {
+		name: config.name.clone(),
+		canonical_name: config.canonical_name.clone(),
+		price_feed_id: config.price_feed_id.parse::<B256>()?,
+		asset_address: config.asset_address.parse::<Address>()?,
+		id: config.id,
+	}))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn configured_registration_metadata_parses_brl_metadata_from_explicit_config() {
+		let brl = parse_registration_metadata_config(
+			"BRL",
+			r#"{
+				"BRL": {
+					"asset_address": "0xfCB34c47f850f452C15EA1B84d51231C38A61783",
+					"id": 3,
+					"name": "BRL",
+					"canonical_name": "BRLA",
+					"price_feed_id": "0xd2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906"
+				}
+			}"#,
+		)
+		.unwrap()
+		.expect("BRL metadata");
+
+		assert_eq!(brl.asset_address, get_asset_address("BRL").unwrap());
+		assert_eq!(brl.id, 3);
+		assert_eq!(brl.name, "BRL");
+		assert_eq!(brl.canonical_name, "BRLA");
+	}
+
+	#[test]
+	fn configured_registration_metadata_accepts_brl_alias_key() {
+		let brl = parse_registration_metadata_config(
+			"BRL",
+			r#"{
+				"BRLA": {
+					"asset_address": "0xfCB34c47f850f452C15EA1B84d51231C38A61783",
+					"id": 3,
+					"name": "BRL",
+					"canonical_name": "BRLA",
+					"price_feed_id": "0xd2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906"
+				}
+			}"#,
+		)
+		.unwrap()
+		.expect("BRL metadata");
+
+		assert_eq!(brl.asset_address, get_asset_address("BRL").unwrap());
+	}
+
+	#[test]
+	fn configured_registration_metadata_ignores_unconfigured_assets() {
+		let metadata = parse_registration_metadata_config(
+			"USDC",
+			r#"{
+				"BRL": {
+					"asset_address": "0xfCB34c47f850f452C15EA1B84d51231C38A61783",
+					"id": 3,
+					"name": "BRL",
+					"canonical_name": "BRLA",
+					"price_feed_id": "0xd2db4dbf1aea74e0f666b0e8f73b9580d407f5e5cf931940b06dc633d7a95906"
+				}
+			}"#,
+		)
+		.unwrap();
+
+		assert!(metadata.is_none());
+	}
 }
