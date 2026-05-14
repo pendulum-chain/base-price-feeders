@@ -91,7 +91,7 @@ impl DarkOracleUpdater {
 			.oracle
 			.unregisterAsset(asset_addr)
 			.gas(500_000)
-			.max_priority_fee_per_gas(priority_fee * 10); // Extra priority fee for unregistering assets, as it blocks everything else.
+			.max_priority_fee_per_gas(priority_fee * 15); // Extra priority fee for unregistering assets, as it blocks everything else.
 
 		let tx_hash = self
 			.client
@@ -128,7 +128,7 @@ impl DarkOracleUpdater {
 				meta.price_feed_id,
 			)
 			.gas(500_000)
-			.max_priority_fee_per_gas(priority_fee * 7);
+			.max_priority_fee_per_gas(priority_fee * 15);
 
 		let tx_hash = self
 			.client
@@ -187,7 +187,7 @@ impl DarkOracleUpdater {
 			.oracle
 			.updatePriceFeeds(prices, timestamp)
 			.gas(1_000_000)
-			.max_priority_fee_per_gas(priority_fee * 7);
+			.max_priority_fee_per_gas(priority_fee * 15);
 
 		let tx_hash = self
 			.client
