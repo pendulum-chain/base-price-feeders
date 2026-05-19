@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const DEFAULT_SAFETY_MARGIN = "0.8";
-const MIN_ETH_BALANCE_THRESHOLD_DEFAULT = "0.25";
+const MIN_ETH_BALANCE_THRESHOLD_DEFAULT = "0.02";
 
 export const config = {
   ALCHEMY_RPC_URL: process.env.ALCHEMY_RPC_URL || "",
