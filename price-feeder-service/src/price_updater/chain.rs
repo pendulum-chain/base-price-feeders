@@ -8,21 +8,25 @@ use alloy::{
 		RootProvider,
 	},
 };
+use log::{error, info, warn};
 use reqwest::Url;
 use std::error::Error;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 const MAX_ELAPSED_INTERVAL_MULTIPLIER: f64 = 0.5;
 const TX_RETRY_DELAY_MS: u64 = 250;
 
 pub struct NonceManager {
 	nonce: Mutex<u64>,
+	address: Address,
+	rpc_url: String,
 }
 
 impl NonceManager {
-	pub fn new(initial_nonce: u64) -> Self {
-		Self { nonce: Mutex::new(initial_nonce) }
+	pub fn new(initial_nonce: u64, address: Address, rpc_url: String) -> Self {
+		Self { nonce: Mutex::new(initial_nonce), address, rpc_url }
 	}
 
 	pub fn next_nonce(&self) -> u64 {
@@ -38,7 +42,56 @@ impl NonceManager {
 			*nonce = chain_nonce;
 		}
 	}
+
+	pub fn force_sync_nonce(&self, chain_nonce: u64) {
+		let mut nonce = self.nonce.lock().unwrap();
+		*nonce = chain_nonce;
+	}
+
+	pub fn get_current_nonce(&self) -> u64 {
+		*self.nonce.lock().unwrap()
+	}
+
+	pub async fn get_onchain_nonce(&self) -> Result<u64, Box<dyn Error + Send + Sync + 'static>> {
+		let rpc_url_parsed = Url::parse(&self.rpc_url).expect("Invalid RPC_URL");
+		let provider = ProviderBuilder::new().on_http(rpc_url_parsed);
+		let onchain_nonce = alloy::providers::Provider::get_transaction_count(&provider, self.address).await?;
+		Ok(onchain_nonce)
+	}
+
+	pub fn address(&self) -> Address {
+		self.address
+	}
+
+	pub fn rpc_url(&self) -> &str {
+		&self.rpc_url
+	}
+
+	pub fn spawn_resync_handler(self: &Arc<Self>) -> mpsc::Sender<()> {
+		let (tx, mut rx) = mpsc::channel::<()>(10);
+		let mgr = Arc::clone(self);
+
+		tokio::spawn(async move {
+			info!("Starting nonce resync handler");
+			while rx.recv().await.is_some() {
+				warn!("[Resync] Received resync signal from watchdog");
+				match mgr.get_onchain_nonce().await {
+					Ok(onchain_nonce) => {
+						info!("[Resync] Forcing nonce to onchain value: {}", onchain_nonce);
+						mgr.force_sync_nonce(onchain_nonce);
+					},
+					Err(e) => {
+						error!("[Resync] Failed to fetch onchain nonce: {:?}", e);
+					},
+				}
+			}
+		});
+
+		tx
+	}
 }
+
+
 
 pub type HttpTransport = alloy::transports::http::Http<reqwest::Client>;
 pub type ChainProvider = FillProvider<
@@ -73,7 +126,7 @@ impl ChainClient {
 
 		let initial_nonce =
 			alloy::providers::Provider::get_transaction_count(&provider, wallet_address).await?;
-		Ok(Arc::new(NonceManager::new(initial_nonce)))
+		Ok(Arc::new(NonceManager::new(initial_nonce, wallet_address, rpc_url)))
 	}
 
 	pub async fn new(

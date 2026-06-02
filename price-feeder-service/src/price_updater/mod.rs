@@ -609,7 +609,11 @@ fn schedule_fetch_trigger(
 }
 
 /// Forwards a transaction hash to the tx_processor channel via `try_send`.
-fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
+fn send_tx(
+	tx: &mpsc::Sender<Tx>,
+	kind: TxKind,
+	tx_hash: B256,
+) {
 	if let Err(e) = tx.try_send(Tx { kind, tx_hash }) {
 		match e {
 			mpsc::error::TrySendError::Full(_) => {
