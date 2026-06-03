@@ -9,7 +9,7 @@ use reqwest::Url;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::price_updater::alerts;
 
@@ -48,15 +48,38 @@ pub enum TxState {
 	Reverted,
 }
 
+#[derive(Debug)]
 struct TrackedTx {
 	tx_hash: B256,
 	timestamp: std::time::Instant,
 	state: TxState,
 }
 
-enum ProcessorMsg {
-	NewTx { kind: UpdateTxKind, tx_hash: B256 },
-	TxOutcome { tx_hash: B256, outcome: ConfirmOutcome },
+/// Scans `tracked` from newest to oldest. Returns `Some(tx_hash)` when the
+/// newest unconfirmed tx at the tail has exceeded `nonce_tx_timeout` (with no
+/// settled tx behind it), or `None` otherwise.
+fn check_watchdog_timeout(
+	tracked: &[TrackedTx],
+	nonce_tx_timeout: std::time::Duration,
+) -> Option<B256> {
+	let now = std::time::Instant::now();
+	log::info!("[Watchdog] Scanning {:?} tracked txs for timeouts...", tracked);
+	for i in (0..tracked.len()).rev() {
+		if tracked[i].state == TxState::Confirmed || tracked[i].state == TxState::Reverted {
+			break;
+		}
+		let elapsed = now.duration_since(tracked[i].timestamp);
+		log::info!(
+			"[Watchdog] Checking tx {:?}: state={:?}, elapsed={:?}",
+			tracked[i].tx_hash,
+			tracked[i].state,
+			elapsed
+		);
+		if elapsed >= nonce_tx_timeout {
+			return Some(tracked[i].tx_hash);
+		}
+	}
+	None
 }
 
 pub struct UpdateTx {
@@ -80,99 +103,74 @@ pub async fn run_tx_processor(
 			.boxed(),
 	);
 
-	let (internal_tx, mut internal_rx) = mpsc::channel::<ProcessorMsg>(200);
-
-	// Forward incoming UpdateTx into internal channel
+	let tracked: Arc<Mutex<Vec<TrackedTx>>> = Arc::new(Mutex::new(Vec::new()));
 	let mut rx = rx;
-	let forwarder_tx = internal_tx.clone();
-	tokio::spawn(async move {
-		while let Some(tx) = rx.recv().await {
-			if forwarder_tx.send(ProcessorMsg::NewTx { kind: tx.kind, tx_hash: tx.tx_hash }).await.is_err() {
-				break;
-			}
-		}
-	});
-
-	let mut tracked: Vec<TrackedTx> = Vec::new();
 	let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(1));
 
 	loop {
 		tokio::select! {
-			Some(msg) = internal_rx.recv() => {
-				match msg {
-					ProcessorMsg::NewTx { kind, tx_hash } => {
-						tracked.push(TrackedTx {
-							tx_hash,
-							timestamp: std::time::Instant::now(),
-							state: TxState::Unconfirmed,
-						});
+			Some(tx) = rx.recv() => {
+				let tx_hash = tx.tx_hash;
+				let kind = tx.kind;
+				{
+					let mut tracked = tracked.lock().await;
+					tracked.push(TrackedTx {
+						tx_hash,
+						timestamp: std::time::Instant::now(),
+						state: TxState::Unconfirmed,
+					});
 
-						if tracked.len() > MAX_TRACKED_TXS {
-							tracked.drain(0..tracked.len() - MAX_TRACKED_TXS);
-						}
+					if tracked.len() > MAX_TRACKED_TXS {
+						let excess = tracked.len() - MAX_TRACKED_TXS;
+						tracked.drain(0..excess);
+					}
 
-						info!(
-							"[{}] Tracking new tx: {:?} (total tracked: {})",
-							kind, tx_hash, tracked.len()
-						);
-
-						let provider = Arc::clone(&provider);
-						let outcome_tx = internal_tx.clone();
-						tokio::spawn(async move {
-							let outcome = confirm_tx(provider, kind, tx_hash).await;
-							let _ = outcome_tx.send(ProcessorMsg::TxOutcome { tx_hash, outcome }).await;
-						});
-					},
-					ProcessorMsg::TxOutcome { tx_hash, outcome } => {
-						if let Some(entry) = tracked.iter_mut().find(|t| t.tx_hash == tx_hash) {
-							match outcome {
-								ConfirmOutcome::Confirmed => {
-									entry.state = TxState::Confirmed;
-									info!("[Watchdog] tx confirmed: {:?}", tx_hash);
-								},
-								ConfirmOutcome::Reverted => {
-									entry.state = TxState::Reverted;
-									warn!("[Watchdog] tx reverted: {:?}", tx_hash);
-								},
-								ConfirmOutcome::RpcError => {
-									// Leave as Unconfirmed so watchdog can detect timeout
-									error!("[Watchdog] RPC error confirming tx: {:?}", tx_hash);
-								},
-							}
-						}
-					},
+					info!(
+						"[{}] Tracking new tx: {:?} (total tracked: {})",
+						kind, tx_hash, tracked.len()
+					);
 				}
+
+				let provider = Arc::clone(&provider);
+				let tracked = Arc::clone(&tracked);
+				tokio::spawn(async move {
+					let outcome = confirm_tx(provider, kind, tx_hash).await;
+					let mut tracked = tracked.lock().await;
+					if let Some(entry) = tracked.iter_mut().find(|t| t.tx_hash == tx_hash) {
+						match outcome {
+							ConfirmOutcome::Confirmed => {
+								entry.state = TxState::Confirmed;
+								info!("[Watchdog] tx confirmed: {:?}", tx_hash);
+							},
+							ConfirmOutcome::Reverted => {
+								entry.state = TxState::Reverted;
+								warn!("[Watchdog] tx reverted: {:?}", tx_hash);
+							},
+							ConfirmOutcome::RpcError => {
+								error!("[Watchdog] RPC error confirming tx: {:?}", tx_hash);
+							},
+						}
+					}
+				});
 			},
 			_ = check_interval.tick() => {
-				let now = std::time::Instant::now();
+				let tracked = tracked.lock().await;
+				if let Some(tx_hash) = check_watchdog_timeout(&tracked, nonce_tx_timeout) {
+					warn!(
+						"[Watchdog] Transaction timeout detected: {:?}. Triggering nonce resync.",
+						tx_hash
+					);
 
-				// Scan from newest (highest index) backwards.
-				// Stop as soon as we hit a settled tx (no older tx can
-				// trigger resync) or the newest unconfirmed tx.
-				for i in (0..tracked.len()).rev() {
-					if tracked[i].state == TxState::Confirmed || tracked[i].state == TxState::Reverted {
-						break;
-					}
-					// tracked[i] is Unconfirmed
-					let elapsed = now.duration_since(tracked[i].timestamp);
-					if elapsed >= nonce_tx_timeout {
-						warn!(
-							"[Watchdog] Transaction timeout detected: {:?} (elapsed: {:?}). Triggering nonce resync.",
-							tracked[i].tx_hash, elapsed
-						);
-
-						if let Err(e) = resync_tx.try_send(()) {
-							match e {
-								mpsc::error::TrySendError::Full(_) => {
-									warn!("[Watchdog] Resync channel full — signal dropped");
-								},
-								mpsc::error::TrySendError::Closed(_) => {
-									error!("[Watchdog] Resync channel closed");
-								},
-							}
+					if let Err(e) = resync_tx.try_send(()) {
+						match e {
+							mpsc::error::TrySendError::Full(_) => {
+								warn!("[Watchdog] Resync channel full — signal dropped");
+							},
+							mpsc::error::TrySendError::Closed(_) => {
+								error!("[Watchdog] Resync channel closed");
+							},
 						}
 					}
-					break;
 				}
 			},
 		}
@@ -226,4 +224,58 @@ async fn on_tx_error(kind: UpdateTxKind, err: Box<dyn Error + Send + Sync + 'sta
 	error!("{}", message);
 
 	alerts::send_slack_alert(message).await;
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+	fn make_tx(state: TxState, age: std::time::Duration) -> TrackedTx {
+		TrackedTx {
+			tx_hash: B256::repeat_byte(0x01),
+			timestamp: std::time::Instant::now() - age,
+			state,
+		}
+	}
+
+	#[test]
+	fn no_signal_when_unconfirmed_not_timed_out() {
+		let tracked = vec![
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(30)),
+			make_tx(TxState::Unconfirmed, std::time::Duration::from_secs(2)),
+		];
+		assert!(check_watchdog_timeout(&tracked, TIMEOUT).is_none());
+	}
+
+	#[test]
+	fn signal_when_newest_unconfirmed_timed_out() {
+		let tracked = vec![
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(60)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(55)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(50)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(45)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(40)),
+			make_tx(TxState::Unconfirmed, std::time::Duration::from_secs(30)),
+			make_tx(TxState::Unconfirmed, std::time::Duration::from_secs(20)),
+			make_tx(TxState::Unconfirmed, std::time::Duration::from_secs(15)),
+		];
+		assert!(check_watchdog_timeout(&tracked, TIMEOUT).is_some());
+	}
+
+	#[test]
+	fn no_signal_when_confirmed_blocks_scan() {
+		let tracked = vec![
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(60)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(55)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(50)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(45)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(40)),
+			make_tx(TxState::Unconfirmed, std::time::Duration::from_secs(30)),
+			make_tx(TxState::Unconfirmed, std::time::Duration::from_secs(20)),
+			make_tx(TxState::Confirmed, std::time::Duration::from_secs(5)),
+		];
+		assert!(check_watchdog_timeout(&tracked, TIMEOUT).is_none());
+	}
 }
