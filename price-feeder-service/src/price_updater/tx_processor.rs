@@ -13,7 +13,8 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::price_updater::alerts;
 
-const MAX_TRACKED_TXS: usize = 100;
+	const MAX_TRACKED_TXS: usize = 100;
+	const RESYNC_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy)]
 pub enum UpdateTxKind {
@@ -63,18 +64,12 @@ fn check_watchdog_timeout(
 	nonce_tx_timeout: std::time::Duration,
 ) -> Option<B256> {
 	let now = std::time::Instant::now();
-	log::info!("[Watchdog] Scanning {:?} tracked txs for timeouts...", tracked);
 	for i in (0..tracked.len()).rev() {
 		if tracked[i].state == TxState::Confirmed || tracked[i].state == TxState::Reverted {
 			break;
 		}
 		let elapsed = now.duration_since(tracked[i].timestamp);
-		log::info!(
-			"[Watchdog] Checking tx {:?}: state={:?}, elapsed={:?}",
-			tracked[i].tx_hash,
-			tracked[i].state,
-			elapsed
-		);
+
 		if elapsed >= nonce_tx_timeout {
 			return Some(tracked[i].tx_hash);
 		}
@@ -106,6 +101,7 @@ pub async fn run_tx_processor(
 	let tracked: Arc<Mutex<Vec<TrackedTx>>> = Arc::new(Mutex::new(Vec::new()));
 	let mut rx = rx;
 	let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+	let mut last_resync_at: Option<std::time::Instant> = None;
 
 	loop {
 		tokio::select! {
@@ -156,20 +152,27 @@ pub async fn run_tx_processor(
 			_ = check_interval.tick() => {
 				let tracked = tracked.lock().await;
 				if let Some(tx_hash) = check_watchdog_timeout(&tracked, nonce_tx_timeout) {
-					warn!(
-						"[Watchdog] Transaction timeout detected: {:?}. Triggering nonce resync.",
-						tx_hash
-					);
+					let can_send = last_resync_at
+						.map(|t| t.elapsed() >= RESYNC_BACKOFF)
+						.unwrap_or(true);
 
-					if let Err(e) = resync_tx.try_send(()) {
-						match e {
-							mpsc::error::TrySendError::Full(_) => {
-								warn!("[Watchdog] Resync channel full — signal dropped");
-							},
-							mpsc::error::TrySendError::Closed(_) => {
-								error!("[Watchdog] Resync channel closed");
-							},
+					if can_send {
+						warn!(
+							"[Watchdog] Transaction timeout detected: {:?}. Triggering nonce resync.",
+							tx_hash
+						);
+
+						if let Err(e) = resync_tx.try_send(()) {
+							match e {
+								mpsc::error::TrySendError::Full(_) => {
+									warn!("[Watchdog] Resync channel full — signal dropped");
+								},
+								mpsc::error::TrySendError::Closed(_) => {
+									error!("[Watchdog] Resync channel closed");
+								},
+							}
 						}
+						last_resync_at = Some(std::time::Instant::now());
 					}
 				}
 			},
