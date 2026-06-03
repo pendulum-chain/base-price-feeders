@@ -88,10 +88,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 	let (update_tx, update_rx) = mpsc::channel::<UpdateTx>(200);
 	let resync_tx = nonce_manager.spawn_resync_handler();
+	let priority_multiplier = dark_oracle_client.priority_multiplier.clone();
 
 	tokio::spawn(async move {
 		info!("Starting on-chain transaction processor with embedded watchdog");
-		tx_processor::run_tx_processor(update_rx, resync_tx, nonce_tx_timeout).await;
+		tx_processor::run_tx_processor(update_rx, resync_tx, nonce_tx_timeout, priority_multiplier).await;
 	});
 
 	let fetch_trigger = Arc::new(Notify::new());

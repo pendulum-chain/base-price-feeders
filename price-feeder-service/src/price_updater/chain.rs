@@ -18,6 +18,74 @@ use tokio::sync::mpsc;
 const MAX_ELAPSED_INTERVAL_MULTIPLIER: f64 = 0.5;
 const TX_RETRY_DELAY_MS: u64 = 250;
 
+const PRIORITY_FEE_STEPS: [u128; 5] = [7, 10, 12, 15, 20];
+const PRIORITY_FEE_BUMP_DOWN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
+
+pub struct PriorityFeeMultiplier {
+	inner: Mutex<PriorityFeeInner>,
+}
+
+struct PriorityFeeInner {
+	step_index: usize,
+	last_bump_at: Option<std::time::Instant>,
+}
+
+impl PriorityFeeMultiplier {
+	pub fn new() -> Self {
+		Self {
+			inner: Mutex::new(PriorityFeeInner {
+				step_index: 0,
+				last_bump_at: None,
+			}),
+		}
+	}
+
+	pub fn bump_up(&self) {
+		let mut inner = self.inner.lock().unwrap();
+		if inner.step_index < PRIORITY_FEE_STEPS.len() - 1 {
+			inner.step_index += 1;
+			inner.last_bump_at = Some(std::time::Instant::now());
+			warn!(
+				"[PriorityFee] Bumped up to multiplier: {}",
+				PRIORITY_FEE_STEPS[inner.step_index]
+			);
+		}
+	}
+
+	pub fn bump_down(&self) {
+		let mut inner = self.inner.lock().unwrap();
+		if inner.step_index > 0 {
+			inner.step_index = 0;
+			inner.last_bump_at = None;
+			warn!(
+				"[PriorityFee] Bumped down to base multiplier: {}",
+				PRIORITY_FEE_STEPS[0]
+			);
+		}
+	}
+
+	pub fn get(&self) -> u128 {
+		let inner = self.inner.lock().unwrap();
+		PRIORITY_FEE_STEPS[inner.step_index]
+	}
+
+	/// Checks if enough time has passed since the last bump to trigger a bump down.
+	/// Returns true if a bump down was performed.
+	pub fn try_bump_down(&self) -> bool {
+		let inner = self.inner.lock().unwrap();
+		if inner.step_index > 0 {
+			if let Some(last_bump) = inner.last_bump_at {
+				if last_bump.elapsed() >= PRIORITY_FEE_BUMP_DOWN_COOLDOWN {
+					drop(inner);
+					self.bump_down();
+					return true;
+				}
+			}
+		}
+		false
+	}
+}
+
 pub struct NonceManager {
 	nonce: Mutex<u64>,
 	address: Address,
@@ -111,6 +179,7 @@ pub struct ChainClient {
 	pub provider: Arc<ChainProvider>,
 	pub nonce_manager: Arc<NonceManager>,
 	pub address: Address,
+	pub priority_multiplier: Arc<PriorityFeeMultiplier>,
 }
 
 impl ChainClient {
@@ -146,15 +215,22 @@ impl ChainClient {
 			.wallet(wallet)
 			.on_http(rpc_url_parsed);
 
-		Ok(Self { provider: Arc::new(provider), nonce_manager, address })
+		Ok(Self {
+			provider: Arc::new(provider),
+			nonce_manager,
+			address,
+			priority_multiplier: Arc::new(PriorityFeeMultiplier::new()),
+		})
 	}
 
 	pub async fn estimate_priority_fee(
 		&self,
 	) -> Result<u128, Box<dyn Error + Send + Sync + 'static>> {
+		self.priority_multiplier.try_bump_down();
 		let fees = alloy::providers::Provider::estimate_eip1559_fees(&*self.provider, None).await?;
 		let priority_fee = fees.max_priority_fee_per_gas;
-		Ok(priority_fee)
+		let multiplier = self.priority_multiplier.get();
+		Ok(priority_fee * multiplier)
 	}
 
 	pub async fn send_tx_with_retry(
@@ -204,4 +280,57 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct PriceData {
 	pub prices: HashMap<String, f64>,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn priority_fee_starts_at_base() {
+		let pf = PriorityFeeMultiplier::new();
+		assert_eq!(pf.get(), 7);
+	}
+
+	#[test]
+	fn priority_fee_bumps_up_through_steps() {
+		let pf = PriorityFeeMultiplier::new();
+		assert_eq!(pf.get(), 7);
+
+		pf.bump_up();
+		assert_eq!(pf.get(), 10);
+
+		pf.bump_up();
+		assert_eq!(pf.get(), 12);
+
+		pf.bump_up();
+		assert_eq!(pf.get(), 15);
+
+		pf.bump_up();
+		assert_eq!(pf.get(), 20);
+
+		// Should stay at max
+		pf.bump_up();
+		assert_eq!(pf.get(), 20);
+	}
+
+	#[test]
+	fn priority_fee_bumps_down_to_base() {
+		let pf = PriorityFeeMultiplier::new();
+		pf.bump_up();
+		pf.bump_up();
+		assert_eq!(pf.get(), 12);
+
+		pf.bump_down();
+		assert_eq!(pf.get(), 7);
+	}
+
+	#[test]
+	fn priority_fee_bump_down_noop_at_base() {
+		let pf = PriorityFeeMultiplier::new();
+		assert_eq!(pf.get(), 7);
+
+		pf.bump_down();
+		assert_eq!(pf.get(), 7);
+	}
 }

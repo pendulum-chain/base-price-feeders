@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::price_updater::alerts;
+use crate::price_updater::chain::PriorityFeeMultiplier;
 
 	const MAX_TRACKED_TXS: usize = 100;
 	const RESYNC_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
@@ -90,6 +91,7 @@ pub async fn run_tx_processor(
 	rx: mpsc::Receiver<UpdateTx>,
 	resync_tx: mpsc::Sender<()>,
 	nonce_tx_timeout: std::time::Duration,
+	priority_multiplier: Arc<PriorityFeeMultiplier>,
 ) {
 	let rpc_url = std::env::var("RPC_URL").expect("RPC_URL not set");
 	let provider = Arc::new(
@@ -173,6 +175,7 @@ pub async fn run_tx_processor(
 							}
 						}
 						last_resync_at = Some(std::time::Instant::now());
+						priority_multiplier.bump_up();
 					}
 				}
 			},
