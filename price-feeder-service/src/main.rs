@@ -79,8 +79,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let pyth_updater =
 		PythPriceUpdater::new(std::time::Duration::from_secs(pyth_update_interval_seconds))?;
 	let nonce_manager = ChainClient::create_nonce_manager().await?;
-	let dark_oracle_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
-	let pyth_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
+	let chain_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
+	let dark_oracle_client = chain_client.clone();
+	let pyth_client = chain_client.clone();
 	let dark_oracle_updater = DarkOracleUpdater::new(
 		dark_oracle_client.clone(),
 		update_interval,
@@ -88,7 +89,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 	let (update_tx, update_rx) = mpsc::channel::<UpdateTx>(200);
 	let resync_tx = nonce_manager.spawn_resync_handler();
-	let priority_multiplier = dark_oracle_client.priority_multiplier.clone();
+	let priority_multiplier = chain_client.priority_multiplier.clone();
 
 	tokio::spawn(async move {
 		info!("Starting on-chain transaction processor with embedded watchdog");

@@ -91,7 +91,7 @@ impl DarkOracleUpdater {
 			.oracle
 			.unregisterAsset(asset_addr)
 			.gas(500_000)
-			.max_priority_fee_per_gas(priority_fee); // Extra priority fee for unregistering assets, as it blocks everything else.
+			.max_priority_fee_per_gas(priority_fee); // Uses the shared estimated priority fee, including any active watchdog bump.
 
 		let tx_hash = self
 			.client

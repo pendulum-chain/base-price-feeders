@@ -230,7 +230,15 @@ impl ChainClient {
 		let fees = alloy::providers::Provider::estimate_eip1559_fees(&*self.provider, None).await?;
 		let priority_fee = fees.max_priority_fee_per_gas;
 		let multiplier = self.priority_multiplier.get();
-		Ok(priority_fee * multiplier)
+		priority_fee
+			.checked_mul(multiplier)
+			.ok_or_else(|| {
+				format!(
+					"priority fee overflow: base fee {} * multiplier {} exceeds u128",
+					priority_fee, multiplier
+				)
+				.into()
+			})
 	}
 
 	pub async fn send_tx_with_retry(
@@ -309,9 +317,12 @@ mod tests {
 		pf.bump_up();
 		assert_eq!(pf.get(), 20);
 
+		pf.bump_up();
+		assert_eq!(pf.get(), 30);
+
 		// Should stay at max
 		pf.bump_up();
-		assert_eq!(pf.get(), 20);
+		assert_eq!(pf.get(), 30);
 	}
 
 	#[test]

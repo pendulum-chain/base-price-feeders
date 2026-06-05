@@ -57,9 +57,9 @@ struct TrackedTx {
 	state: TxState,
 }
 
-/// Scans `tracked` from newest to oldest. Returns `Some(tx_hash)` when the
-/// newest unconfirmed tx at the tail has exceeded `nonce_tx_timeout` (with no
-/// settled tx behind it), or `None` otherwise.
+/// Scans `tracked` from newest to oldest. Returns `Some(tx_hash)` when any
+/// unconfirmed tx in the contiguous tail (after the newest Confirmed/Reverted)
+/// has exceeded `nonce_tx_timeout`, or `None` otherwise.
 fn check_watchdog_timeout(
 	tracked: &[TrackedTx],
 	nonce_tx_timeout: std::time::Duration,
@@ -84,8 +84,8 @@ pub struct UpdateTx {
 }
 
 /// Receives `UpdateTx` messages, handles confirmation, and tracks tx state
-/// for watchdog-style timeout detection. When a timeout is detected on the
-/// oldest unconfirmed tx (with no confirmed/reverted tx ahead of it),
+/// for watchdog-style timeout detection. When a timeout is detected for an
+/// unconfirmed tx in the contiguous tail (after the newest Confirmed/Reverted),
 /// a resync signal is sent via `resync_tx`.
 pub async fn run_tx_processor(
 	rx: mpsc::Receiver<UpdateTx>,
