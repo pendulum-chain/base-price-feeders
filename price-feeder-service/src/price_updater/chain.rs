@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 const MAX_ELAPSED_INTERVAL_MULTIPLIER: f64 = 0.5;
 const TX_RETRY_DELAY_MS: u64 = 250;
 
-const PRIORITY_FEE_STEPS: [u128; 5] = [7, 10, 12, 15, 20];
+const PRIORITY_FEE_STEPS: [u128; 5] = [7, 10, 12, 15, 20, 30];
 const PRIORITY_FEE_BUMP_DOWN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
 
 pub struct PriorityFeeMultiplier {
