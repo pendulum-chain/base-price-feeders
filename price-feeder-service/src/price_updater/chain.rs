@@ -18,10 +18,21 @@ use tokio::sync::mpsc;
 const MAX_ELAPSED_INTERVAL_MULTIPLIER: f64 = 0.5;
 const TX_RETRY_DELAY_MS: u64 = 250;
 
-const PRIORITY_FEE_STEPS: [u128; 6] = [7, 10, 12, 15, 20, 30];
+const DEFAULT_BASE_FEE_MULTIPLIER: f32 = 7.0;
+
+// Step multipliers applied on top of BASE_FEE_MULTIPLIER. 
+// Effective priority assuming BASE_FEE_MULTIPLIER = 7.0:
+// Step 0: 7.0 * 1.1 = 7.7
+// Step 1: 7.0 * 1.2 = 8.4
+// Step 2: 7.0 * 1.4 = 9.8	
+// Step 3: 7.0 * 1.5 = 10.5
+// Step 4: 7.0 * 2.0 = 14.0
+// Step 5: 7.0 * 3.0 = 21.0
+const PRIORITY_FEE_STEPS: [f32; 6] = [1.1, 1.2, 1.4, 1.5, 2.0, 3.0];
 const PRIORITY_FEE_BUMP_DOWN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
 
 pub struct PriorityFeeMultiplier {
+	base_multiplier: f32,
 	inner: Mutex<PriorityFeeInner>,
 }
 
@@ -31,8 +42,9 @@ struct PriorityFeeInner {
 }
 
 impl PriorityFeeMultiplier {
-	pub fn new() -> Self {
+	pub fn new(base_multiplier: f32) -> Self {
 		Self {
+			base_multiplier,
 			inner: Mutex::new(PriorityFeeInner {
 				step_index: 0,
 				last_bump_at: None,
@@ -47,7 +59,7 @@ impl PriorityFeeMultiplier {
 			inner.last_bump_at = Some(std::time::Instant::now());
 			warn!(
 				"[PriorityFee] Bumped up to multiplier: {}",
-				PRIORITY_FEE_STEPS[inner.step_index]
+				self.effective_multiplier(inner.step_index)
 			);
 		}
 	}
@@ -58,15 +70,23 @@ impl PriorityFeeMultiplier {
 			inner.step_index = 0;
 			inner.last_bump_at = None;
 			warn!(
-				"[PriorityFee] Bumped down to base multiplier: {}",
-				PRIORITY_FEE_STEPS[0]
+				"[PriorityFee] Bumped down to multiplier: {}",
+				self.effective_multiplier(0)
 			);
 		}
 	}
 
-	pub fn get(&self) -> u128 {
+	pub fn get(&self) -> f32 {
 		let inner = self.inner.lock().unwrap();
-		PRIORITY_FEE_STEPS[inner.step_index]
+		self.effective_multiplier(inner.step_index)
+	}
+
+	pub fn base(&self) -> f32 {
+		self.base_multiplier
+	}
+
+	fn effective_multiplier(&self, step_index: usize) -> f32 {
+		PRIORITY_FEE_STEPS[step_index] * self.base_multiplier
 	}
 
 	/// Checks if enough time has passed since the last bump to trigger a bump down.
@@ -208,7 +228,13 @@ impl ChainClient {
 		let address = signer.address();
 		let wallet = EthereumWallet::from(signer);
 
-		let rpc_url_parsed = Url::parse(&rpc_url).expect("Invalid RPC_URL");
+		let rpc_url_parsed = Url::parse(&rpc_url)?;
+
+		let base_fee_multiplier: f32 = std::env::var("BASE_FEE_MULTIPLIER")
+			.ok()
+			.and_then(|s| s.parse().ok())
+			.unwrap_or(DEFAULT_BASE_FEE_MULTIPLIER);
+		info!("Base fee multiplier: {}", base_fee_multiplier);
 
 		let provider = ProviderBuilder::new()
 			.with_recommended_fillers()
@@ -219,7 +245,7 @@ impl ChainClient {
 			provider: Arc::new(provider),
 			nonce_manager,
 			address,
-			priority_multiplier: Arc::new(PriorityFeeMultiplier::new()),
+			priority_multiplier: Arc::new(PriorityFeeMultiplier::new(base_fee_multiplier)),
 		})
 	}
 
@@ -230,15 +256,15 @@ impl ChainClient {
 		let fees = alloy::providers::Provider::estimate_eip1559_fees(&*self.provider, None).await?;
 		let priority_fee = fees.max_priority_fee_per_gas;
 		let multiplier = self.priority_multiplier.get();
-		priority_fee
-			.checked_mul(multiplier)
-			.ok_or_else(|| {
-				format!(
-					"priority fee overflow: base fee {} * multiplier {} exceeds u128",
-					priority_fee, multiplier
-				)
-				.into()
-			})
+		let scaled = (priority_fee as f64) * (multiplier as f64);
+		if !scaled.is_finite() || scaled < 0.0 || scaled > u128::MAX as f64 {
+			return Err(format!(
+				"priority fee overflow: base fee {} * multiplier {} exceeds u128",
+				priority_fee, multiplier
+			)
+			.into());
+		}
+		Ok(scaled as u128)
 	}
 
 	pub async fn send_tx_with_retry(
@@ -294,54 +320,61 @@ pub struct PriceData {
 mod tests {
 	use super::*;
 
+	const BASE: f32 = 7.0;
+	const EPS: f32 = 1e-4;
+
+	fn approx_eq(a: f32, b: f32) -> bool {
+		(a - b).abs() < EPS
+	}
+
 	#[test]
 	fn priority_fee_starts_at_base() {
-		let pf = PriorityFeeMultiplier::new();
-		assert_eq!(pf.get(), 7);
+		let pf = PriorityFeeMultiplier::new(BASE);
+		assert!(approx_eq(pf.get(), 7.7));
 	}
 
 	#[test]
 	fn priority_fee_bumps_up_through_steps() {
-		let pf = PriorityFeeMultiplier::new();
-		assert_eq!(pf.get(), 7);
+		let pf = PriorityFeeMultiplier::new(BASE);
+		assert!(approx_eq(pf.get(), 7.7));
 
 		pf.bump_up();
-		assert_eq!(pf.get(), 10);
+		assert!(approx_eq(pf.get(), 8.4));
 
 		pf.bump_up();
-		assert_eq!(pf.get(), 12);
+		assert!(approx_eq(pf.get(), 9.8));
 
 		pf.bump_up();
-		assert_eq!(pf.get(), 15);
+		assert!(approx_eq(pf.get(), 10.5));
 
 		pf.bump_up();
-		assert_eq!(pf.get(), 20);
+		assert!(approx_eq(pf.get(), 14.0));
 
 		pf.bump_up();
-		assert_eq!(pf.get(), 30);
+		assert!(approx_eq(pf.get(), 21.0));
 
 		// Should stay at max
 		pf.bump_up();
-		assert_eq!(pf.get(), 30);
+		assert!(approx_eq(pf.get(), 21.0));
 	}
 
 	#[test]
 	fn priority_fee_bumps_down_to_base() {
-		let pf = PriorityFeeMultiplier::new();
+		let pf = PriorityFeeMultiplier::new(BASE);
 		pf.bump_up();
 		pf.bump_up();
-		assert_eq!(pf.get(), 12);
+		assert!(approx_eq(pf.get(), 9.8));
 
 		pf.bump_down();
-		assert_eq!(pf.get(), 7);
+		assert!(approx_eq(pf.get(), 7.7));
 	}
 
 	#[test]
 	fn priority_fee_bump_down_noop_at_base() {
-		let pf = PriorityFeeMultiplier::new();
-		assert_eq!(pf.get(), 7);
+		let pf = PriorityFeeMultiplier::new(BASE);
+		assert!(approx_eq(pf.get(), 7.7));
 
 		pf.bump_down();
-		assert_eq!(pf.get(), 7);
+		assert!(approx_eq(pf.get(), 7.7));
 	}
 }
