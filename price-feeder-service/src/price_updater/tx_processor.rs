@@ -48,6 +48,9 @@ pub enum TxState {
 	Confirmed,
 	Unconfirmed,
 	Reverted,
+	/// Watchdog already fired a resync for this tx and is now skipping it so
+	/// it doesn't keep re-arming against the same stuck hash.
+	TimedOut,
 }
 
 #[derive(Debug)]
@@ -59,15 +62,21 @@ struct TrackedTx {
 
 /// Scans `tracked` from newest to oldest. Returns `Some(tx_hash)` when any
 /// unconfirmed tx in the contiguous tail (after the newest Confirmed/Reverted)
-/// has exceeded `nonce_tx_timeout`, or `None` otherwise.
+/// has exceeded `nonce_tx_timeout`, or `None` otherwise. Tx hashes already
+/// marked `TimedOut` are skipped so the watchdog can't re-arm against the
+/// same stuck hash indefinitely.
 fn check_watchdog_timeout(
 	tracked: &[TrackedTx],
 	nonce_tx_timeout: std::time::Duration,
 ) -> Option<B256> {
 	let now = std::time::Instant::now();
 	for i in (0..tracked.len()).rev() {
-		if tracked[i].state == TxState::Confirmed || tracked[i].state == TxState::Reverted {
+		let state = tracked[i].state;
+		if state == TxState::Confirmed || state == TxState::Reverted {
 			break;
+		}
+		if state == TxState::TimedOut {
+			continue;
 		}
 		let elapsed = now.duration_since(tracked[i].timestamp);
 
@@ -152,8 +161,11 @@ pub async fn run_tx_processor(
 				});
 			},
 			_ = check_interval.tick() => {
-				let tracked = tracked.lock().await;
-				if let Some(tx_hash) = check_watchdog_timeout(&tracked, nonce_tx_timeout) {
+				let timeout_tx = {
+					let tracked = tracked.lock().await;
+					check_watchdog_timeout(&tracked, nonce_tx_timeout)
+				};
+				if let Some(tx_hash) = timeout_tx {
 					let can_send = last_resync_at
 						.map(|t| t.elapsed() >= RESYNC_BACKOFF)
 						.unwrap_or(true);
@@ -176,6 +188,17 @@ pub async fn run_tx_processor(
 						}
 						last_resync_at = Some(std::time::Instant::now());
 						priority_multiplier.bump_up();
+
+						// Mark this tx so the watchdog doesn't keep re-arming
+						// against the same stuck hash every tick.
+						let mut tracked = tracked.lock().await;
+						if let Some(entry) =
+							tracked.iter_mut().find(|t| t.tx_hash == tx_hash)
+						{
+							if entry.state == TxState::Unconfirmed {
+								entry.state = TxState::TimedOut;
+							}
+						}
 					}
 				}
 			},

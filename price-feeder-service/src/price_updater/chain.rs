@@ -143,7 +143,13 @@ impl NonceManager {
 	pub async fn get_onchain_nonce(&self) -> Result<u64, Box<dyn Error + Send + Sync + 'static>> {
 		let rpc_url_parsed = Url::parse(&self.rpc_url).expect("Invalid RPC_URL");
 		let provider = ProviderBuilder::new().on_http(rpc_url_parsed);
-		let onchain_nonce = alloy::providers::Provider::get_transaction_count(&provider, self.address).await?;
+		// Use the "pending" block tag so the returned nonce accounts for txs
+		// already in the mempool. Querying the default ("latest") nonce would
+		// ignore those and race against in-flight submissions, causing the
+		// nonce manager to regress below pending transactions.
+		let onchain_nonce = alloy::providers::Provider::get_transaction_count(&provider, self.address)
+			.pending()
+			.await?;
 		Ok(onchain_nonce)
 	}
 
@@ -294,9 +300,13 @@ impl ChainClient {
 					let err_msg = e.to_string();
 					if err_msg.contains("nonce too low") {
 						log::warn!("Caught 'nonce too low' (try {}). Syncing...", retries);
+						// Use the "pending" nonce to account for txs already in
+						// the node's mempool; otherwise we'd skip in-flight txs.
 						let chain_nonce = alloy::providers::Provider::get_transaction_count(
 							&*self.provider, self.address
-						).await?;
+						)
+							.pending()
+							.await?;
 						self.nonce_manager.sync_nonce(chain_nonce);
 						nonce = self.nonce_manager.next_nonce();
 					} else {
