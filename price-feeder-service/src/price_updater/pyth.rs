@@ -1,9 +1,10 @@
 use super::chain::{ChainClient, PriceData};
+use super::tx_processor::UpdateTxKind;
 use alloy::{
 	primitives::{Address, Bytes, B256},
 	sol,
 };
-use log::{debug, error, info};
+use log::debug;
 use serde::Deserialize;
 use std::error::Error;
 use std::sync::Arc;
@@ -175,16 +176,17 @@ impl PythPriceUpdater {
 	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
 		let pyth_adapter = PythAdapter::new(self.adapter_address, &*client.provider);
 		let update_fee = pyth_adapter.getUpdateFee(bytes_data.clone()).call().await?.updateFee_;
-		let priority_fee = client.estimate_priority_fee().await?;
-		info!("Pyth priority fee: {} wei", priority_fee);
 
-		let call_builder = pyth_adapter
-			.updatePriceFeeds(bytes_data)
-			.value(update_fee)
-			.gas(1_000_000)
-			.max_priority_fee_per_gas(priority_fee);
+		let call_builder =
+			pyth_adapter.updatePriceFeeds(bytes_data).value(update_fee).gas(1_000_000);
 
-		let tx_hash = client.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval).await?;
+		let tx_hash = client
+			.send_tx_with_retry(
+				call_builder.into_transaction_request(),
+				UpdateTxKind::Pyth,
+				self.update_interval,
+			)
+			.await?;
 
 		Ok(tx_hash)
 	}

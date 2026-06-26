@@ -4,19 +4,18 @@ pub mod configs;
 pub mod dark_oracle;
 pub mod helpers;
 pub mod pyth;
+pub mod tx_engine;
 pub mod tx_processor;
 
 pub use alerts::PriceDivergenceAlert;
 pub use chain::ChainClient;
 pub use dark_oracle::DarkOracleUpdater;
 pub use pyth::PythPriceUpdater;
-pub use tx_processor::UpdateTx;
 
 use crate::api::PriceApi;
 use crate::storage::CoinInfoStorage;
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
-use alloy::primitives::B256;
 use configs::HierarchyEntry;
 use helpers::{convert_to_coin_info, BIPS_DIVISOR};
 use log::{debug, error, info, warn};
@@ -24,7 +23,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
-use tx_processor::{ConfirmOutcome, UpdateTx as Tx, UpdateTxKind as TxKind};
+use tx_processor::{ConfirmOutcome, UpdateTxKind as TxKind};
 
 pub use configs::ProviderHierarchy;
 
@@ -35,7 +34,7 @@ const DISABLE_FAILURE_THRESHOLD: u8 = 3;
 // Backoff between disable-tx resubmissions while we wait for an on-chain
 const DISABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 
-// The longer this value, the "oldest" the price feed at the time of feeding it. But if a fetch cycle 
+// The longer this value, the "oldest" the price feed at the time of feeding it. But if a fetch cycle
 // ends up taking longer, we missed the cycle and the feed process uses prices from previous iteration.
 pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(700);
 
@@ -318,9 +317,7 @@ async fn handle_asset_exhausted(
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
-
-
-/// The fetch loop runs **on demand**: it sleeps until either the feed loop signals 
+/// The fetch loop runs **on demand**: it sleeps until either the feed loop signals
 //       via `fetch_trigger` (the normal case, scheduled
 ///      to fire `FETCH_LEAD_TIME` before each feed tick), or
 ///
@@ -333,17 +330,13 @@ pub async fn run_fetch_loop<T>(
 	update_interval: std::time::Duration,
 	fetch_trigger: Arc<Notify>,
 	api: T,
-	_update_tx: mpsc::Sender<UpdateTx>,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>>
 where
 	T: PriceApi + Send + Sync + 'static,
 {
-
 	let _ = run_single_fetch(&storage, &supported_currencies, &api).await;
 
-
 	loop {
-
 		fetch_trigger.notified().await;
 
 		// Run fetches; on any provider error, retry immediately without
@@ -432,7 +425,6 @@ pub async fn run_feed_loop(
 	divergence_threshold_bp: u64,
 	dark_oracle_updater: DarkOracleUpdater,
 	divergence_tx: mpsc::Sender<PriceDivergenceAlert>,
-	update_tx: mpsc::Sender<UpdateTx>,
 	mut pyth_updater: PythPriceUpdater,
 	pyth_client: Arc<ChainClient>,
 	fetch_trigger: Arc<Notify>,
@@ -456,9 +448,9 @@ pub async fn run_feed_loop(
 
 		let pyth_future = async {
 			match pyth_updater.run_update(pyth_client.clone(), &supported_currencies).await {
-				Ok((tx_hash_opt, price_data)) => {
+				Ok((tx_hash_opt, _price_data)) => {
 					if let Some(tx_hash) = tx_hash_opt {
-						send_tx(&update_tx, TxKind::Pyth, tx_hash);
+						info!("[Pyth] submitted tx: {:?}", tx_hash);
 					}
 				},
 				Err(e) => {
@@ -532,7 +524,7 @@ pub async fn run_feed_loop(
 			} else {
 				match dark_oracle_updater.update_prices(&currencies_to_feed).await {
 					Ok((tx_hash, price_data)) => {
-						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
+						info!("[DarkOracle] submitted tx: {:?}", tx_hash);
 
 						// Price divergence validation for EURC
 						let pyth_eurc_tf =
@@ -606,24 +598,6 @@ fn schedule_fetch_trigger(
 		tokio::time::sleep_until(wake_at).await;
 		trigger.notify_one();
 	});
-}
-
-/// Forwards a transaction hash to the tx_processor channel via `try_send`.
-fn send_tx(
-	tx: &mpsc::Sender<Tx>,
-	kind: TxKind,
-	tx_hash: B256,
-) {
-	if let Err(e) = tx.try_send(Tx { kind, tx_hash }) {
-		match e {
-			mpsc::error::TrySendError::Full(_) => {
-				warn!("[{kind}] tx_processor channel full — tx_hash dropped");
-			},
-			mpsc::error::TrySendError::Closed(_) => {
-				error!("[{kind}] tx_processor channel closed");
-			},
-		}
-	}
 }
 
 #[cfg(test)]

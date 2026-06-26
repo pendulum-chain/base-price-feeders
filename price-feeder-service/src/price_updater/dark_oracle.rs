@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use super::chain::{ChainClient, ChainProvider, HttpTransport, PriceData};
 use super::configs;
+use super::tx_processor::UpdateTxKind;
 use crate::types::CoinInfo;
 
 sol! {
@@ -86,16 +87,15 @@ impl DarkOracleUpdater {
 
 		let meta = self.fetch_asset_meta(asset_addr).await?;
 
-		let priority_fee = self.client.estimate_priority_fee().await?;
-		let call_builder = self
-			.oracle
-			.unregisterAsset(asset_addr)
-			.gas(500_000)
-			.max_priority_fee_per_gas(priority_fee); // Uses the shared estimated priority fee, including any active watchdog bump.
+		let call_builder = self.oracle.unregisterAsset(asset_addr).gas(500_000);
 
 		let tx_hash = self
 			.client
-			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
+			.send_tx_with_retry(
+				call_builder.into_transaction_request(),
+				UpdateTxKind::DisableAsset,
+				self.update_interval,
+			)
 			.await?;
 		Ok((tx_hash, meta))
 	}
@@ -117,7 +117,6 @@ impl DarkOracleUpdater {
 	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
 		info!("Enabling DarkOracle contract asset {}...", symbol);
 
-		let priority_fee = self.client.estimate_priority_fee().await?;
 		let call_builder = self
 			.oracle
 			.registerAsset(
@@ -127,12 +126,15 @@ impl DarkOracleUpdater {
 				meta.canonical_name.clone(),
 				meta.price_feed_id,
 			)
-			.gas(500_000)
-			.max_priority_fee_per_gas(priority_fee);
+			.gas(500_000);
 
 		let tx_hash = self
 			.client
-			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
+			.send_tx_with_retry(
+				call_builder.into_transaction_request(),
+				UpdateTxKind::EnableAsset,
+				self.update_interval,
+			)
 			.await?;
 		Ok(tx_hash)
 	}
@@ -180,18 +182,15 @@ impl DarkOracleUpdater {
 		info!("Updating DarkOracle contract prices: {:?}", prices);
 		info!("Timestamp: {:?}", timestamp);
 
-		let priority_fee = self.client.estimate_priority_fee().await?;
-		info!("DarkOracle priority fee: {} wei", priority_fee);
-
-		let call_builder = self
-			.oracle
-			.updatePriceFeeds(prices, timestamp)
-			.gas(1_000_000)
-			.max_priority_fee_per_gas(priority_fee);
+		let call_builder = self.oracle.updatePriceFeeds(prices, timestamp).gas(1_000_000);
 
 		let tx_hash = self
 			.client
-			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
+			.send_tx_with_retry(
+				call_builder.into_transaction_request(),
+				UpdateTxKind::DarkOracle,
+				self.update_interval,
+			)
 			.await?;
 
 		let mut prices_map = HashMap::new();

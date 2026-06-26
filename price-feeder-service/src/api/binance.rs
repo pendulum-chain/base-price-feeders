@@ -31,15 +31,14 @@ impl BinancePriceApi {
 			futures.push((asset.clone(), invert, future));
 		}
 
-		let results = futures::future::join_all(futures.into_iter().map(
-			|(asset, invert, fut)| async move {
+		let results =
+			futures::future::join_all(futures.into_iter().map(|(asset, invert, fut)| async move {
 				match fut.await {
 					Ok(price_data) => Ok((asset, invert, price_data)),
 					Err(e) => Err((asset, e)),
 				}
-			},
-		))
-		.await;
+			}))
+			.await;
 
 		let mut quotations = Vec::new();
 		for result in results {
@@ -56,13 +55,11 @@ impl BinancePriceApi {
 							let bp = Decimal::from(self.brl_bps_adjustment.unsigned_abs());
 							let adjustment = bp * final_price / Decimal::from(10_000u64);
 							if self.brl_bps_adjustment > 0 {
-								final_price = final_price
-									.checked_sub(adjustment)
-									.unwrap_or(final_price);
+								final_price =
+									final_price.checked_sub(adjustment).unwrap_or(final_price);
 							} else {
-								final_price = final_price
-									.checked_add(adjustment)
-									.unwrap_or(final_price);
+								final_price =
+									final_price.checked_add(adjustment).unwrap_or(final_price);
 							}
 						}
 

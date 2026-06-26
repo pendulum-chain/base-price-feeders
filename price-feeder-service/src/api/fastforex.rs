@@ -22,10 +22,8 @@ impl FastForexPriceApi {
 		&self,
 		assets: Vec<&AssetSpecifier>,
 	) -> Result<Vec<Quotation>, FastForexError> {
-		let pairs: Vec<String> = assets
-			.iter()
-			.filter_map(|asset| Self::convert_to_pair(asset))
-			.collect();
+		let pairs: Vec<String> =
+			assets.iter().filter_map(|asset| Self::convert_to_pair(asset)).collect();
 
 		if pairs.is_empty() {
 			return Ok(Vec::new());
@@ -92,10 +90,7 @@ impl FastForexClient {
 		FastForexClient { host: config.ff_host_url, api_key: config.ff_api_key }
 	}
 
-	async fn get_quotes(
-		&self,
-		pairs: &[String],
-	) -> Result<FastForexResponse, FastForexError> {
+	async fn get_quotes(&self, pairs: &[String]) -> Result<FastForexResponse, FastForexError> {
 		let client = reqwest::Client::new();
 		let pairs_str = pairs.join(",");
 		let url = reqwest::Url::parse_with_params(
@@ -131,26 +126,17 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_convert_eurc_to_fx_pair() {
-		let asset = AssetSpecifier {
-			blockchain: "Base".to_string(),
-			symbol: "EURC".to_string(),
-		};
+		let asset = AssetSpecifier { blockchain: "Base".to_string(), symbol: "EURC".to_string() };
 		let pair = FastForexPriceApi::convert_to_pair(&asset);
 		assert_eq!(pair, Some("EURUSD".to_string()));
 	}
 
 	#[tokio::test]
 	async fn test_is_supported() {
-		let eurc = AssetSpecifier {
-			blockchain: "Base".to_string(),
-			symbol: "EURC".to_string(),
-		};
+		let eurc = AssetSpecifier { blockchain: "Base".to_string(), symbol: "EURC".to_string() };
 		assert!(FastForexPriceApi::is_supported(&eurc));
 
-		let xyz = AssetSpecifier {
-			blockchain: "Base".to_string(),
-			symbol: "XYZ".to_string(),
-		};
+		let xyz = AssetSpecifier { blockchain: "Base".to_string(), symbol: "XYZ".to_string() };
 		assert!(!FastForexPriceApi::is_supported(&xyz));
 	}
 }

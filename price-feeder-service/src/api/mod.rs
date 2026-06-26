@@ -33,7 +33,11 @@ pub struct PriceApiImpl {
 }
 
 impl PriceApiImpl {
-	pub fn new(coingecko_config: CoingeckoConfig, fastforex_config: FastForexConfig, brl_bps_adjustment: i64) -> Self {
+	pub fn new(
+		coingecko_config: CoingeckoConfig,
+		fastforex_config: FastForexConfig,
+		brl_bps_adjustment: i64,
+	) -> Self {
 		Self {
 			binance_price_api: BinancePriceApi::new(brl_bps_adjustment),
 			coinbase_price_api: CoinbasePriceApi::new(),
@@ -72,7 +76,6 @@ impl PriceApi for PriceApiImpl {
 			.copied()
 			.filter(|asset| FastForexPriceApi::is_supported(asset))
 			.collect();
-
 
 		let (binance_quotes, coinbase_quotes, coingecko_quotes, fastforex_quotes) = tokio::join!(
 			self.get_binance_quotations(binance_assets),

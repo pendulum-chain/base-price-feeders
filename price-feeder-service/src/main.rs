@@ -13,9 +13,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 
 use crate::price_updater::{
-	alerts, chain::ChainClient,
-	tx_processor, DarkOracleUpdater, PriceDivergenceAlert,
-	ProviderHierarchy, PythPriceUpdater, UpdateTx,
+	alerts, chain::ChainClient, DarkOracleUpdater, PriceDivergenceAlert, ProviderHierarchy,
+	PythPriceUpdater,
 };
 
 mod api;
@@ -67,8 +66,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let pyth_update_interval_seconds = args.pyth_update_interval_seconds;
 	let price_divergence_threshold_bp = args.price_divergence_threshold_bp;
 
-	let nonce_tx_timeout = std::time::Duration::from_secs(args.nonce_tx_timeout_secs);
-
 	let (divergence_tx, divergence_rx) = mpsc::channel::<PriceDivergenceAlert>(100);
 
 	tokio::spawn(async move {
@@ -78,29 +75,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 	let pyth_updater =
 		PythPriceUpdater::new(std::time::Duration::from_secs(pyth_update_interval_seconds))?;
-	let nonce_manager = ChainClient::create_nonce_manager().await?;
-	let chain_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
+	let chain_client = Arc::new(ChainClient::new().await?);
+	chain_client.tx_engine.spawn_confirmation_loop();
 	let dark_oracle_client = chain_client.clone();
 	let pyth_client = chain_client.clone();
-	let dark_oracle_updater = DarkOracleUpdater::new(
-		dark_oracle_client.clone(),
-		update_interval,
-	)?;
-
-	let (update_tx, update_rx) = mpsc::channel::<UpdateTx>(200);
-	let resync_tx = nonce_manager.spawn_resync_handler();
-	let priority_multiplier = chain_client.priority_multiplier.clone();
-
-	tokio::spawn(async move {
-		info!("Starting on-chain transaction processor with embedded watchdog");
-		tx_processor::run_tx_processor(update_rx, resync_tx, nonce_tx_timeout, priority_multiplier).await;
-	});
+	let dark_oracle_updater = DarkOracleUpdater::new(dark_oracle_client.clone(), update_interval)?;
 
 	let fetch_trigger = Arc::new(Notify::new());
 
 	let fetch_storage = storage.clone();
 	let fetch_currencies = supported_currencies.clone();
-	let fetch_update_tx = update_tx.clone();
 	let fetch_trigger_clone = fetch_trigger.clone();
 	let coingecko_config = args.coingecko.clone();
 	let fastforex_config = args.fastforex.clone();
@@ -115,7 +99,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			update_interval,
 			fetch_trigger_clone,
 			price_api,
-			fetch_update_tx,
 		)
 		.await;
 	});
@@ -131,7 +114,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			price_divergence_threshold_bp,
 			dark_oracle_updater,
 			divergence_tx,
-			update_tx,
 			pyth_updater,
 			pyth_client,
 			fetch_trigger,
