@@ -53,6 +53,22 @@ impl FastForexPriceApi {
 			}
 		}
 
+		if quotations.is_empty() {
+			let requested: Vec<String> =
+				pairs.iter().map(|p| p.replace('/', "")).collect();
+			let missing: Vec<String> = requested
+				.iter()
+				.filter(|k| !response.quotes.contains_key(*k))
+				.cloned()
+				.collect();
+			log::warn!(
+				"FastForex returned no quotes: requested={:?}, missing={:?}, response_keys={:?}",
+				requested,
+				missing,
+				response.quotes.keys().collect::<Vec<_>>()
+			);
+		}
+
 		Ok(quotations)
 	}
 

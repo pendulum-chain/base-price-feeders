@@ -6,6 +6,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+pub enum TimeframeStatus {
+	Fresh(CoinInfo),
+	Stale {
+		#[allow(dead_code)]
+		coin_info: CoinInfo,
+		age_ms: u64,
+		max_age_ms: u64,
+	},
+	Missing,
+}
+
 pub const MAX_AGE_MULTIPLIER_PERCENT: u64 = 200; // 200% of the update interval, should cover a missed fetch cycle.
 
 #[derive(Clone)]
@@ -105,6 +116,27 @@ impl CoinInfoStorage {
 	) -> Option<CoinInfo> {
 		let key = format!("{}_{}_{}", token, blockchain, provider);
 		self.timeframes.read().unwrap().get(&key).cloned()
+	}
+
+	/// Freshness-checked lookup that distinguishes missing entries from stale
+	/// ones. See [`TimeframeStatus`].
+	pub fn get_timeframe_status(
+		&self,
+		token: &str,
+		blockchain: &str,
+		provider: Aggregator,
+	) -> TimeframeStatus {
+		let Some(tf) = self.get_timeframe_any(token, blockchain, provider) else {
+			return TimeframeStatus::Missing;
+		};
+		let now = chrono::Utc::now().timestamp_millis() as u64;
+		let age_ms = now.saturating_sub(tf.last_update_timestamp);
+		let max_age_ms = self.max_entry_age_ms();
+		if age_ms > max_age_ms {
+			TimeframeStatus::Stale { coin_info: tf, age_ms, max_age_ms }
+		} else {
+			TimeframeStatus::Fresh(tf)
+		}
 	}
 
 }

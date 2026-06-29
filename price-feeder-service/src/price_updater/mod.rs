@@ -13,7 +13,7 @@ pub use pyth::PythPriceUpdater;
 pub use tx_processor::UpdateTx;
 
 use crate::api::PriceApi;
-use crate::storage::CoinInfoStorage;
+use crate::storage::{CoinInfoStorage, TimeframeStatus};
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
 use alloy::primitives::B256;
@@ -483,11 +483,27 @@ pub async fn run_feed_loop(
 				} else {
 					asset.blockchain.as_str()
 				};
-				selected_tf = storage.get_timeframe(&asset.symbol, blockchain, aggregator.clone());
-				if selected_tf.is_some() {
-					break;
-				} else {
-					warn!("{} failed for {}. Trying next provider.", aggregator, asset.symbol);
+				match storage.get_timeframe_status(
+					&asset.symbol,
+					blockchain,
+					aggregator.clone(),
+				) {
+					TimeframeStatus::Fresh(tf) => {
+						selected_tf = Some(tf);
+						break;
+					},
+					TimeframeStatus::Stale { age_ms, max_age_ms, .. } => {
+						warn!(
+							"{} entry for {} is stale (age {}ms > max {}ms). Trying next provider.",
+							aggregator, asset.symbol, age_ms, max_age_ms
+						);
+					},
+					TimeframeStatus::Missing => {
+						warn!(
+							"{} has no entry for {}. Trying next provider.",
+							aggregator, asset.symbol
+						);
+					},
 				}
 			}
 
@@ -530,6 +546,13 @@ pub async fn run_feed_loop(
 			if missing_data {
 				error!("Rejecting feeding transaction because at least 1 token is missing data");
 			} else {
+				let provider_summary = currencies_to_feed
+					.iter()
+					.map(|c| format!("{}={}", c.symbol, c.provider))
+					.collect::<Vec<_>>()
+					.join(", ");
+				info!("Pushing prices to DarkOracle on-chain from providers: {}", provider_summary);
+
 				match dark_oracle_updater.update_prices(&currencies_to_feed).await {
 					Ok((tx_hash, price_data)) => {
 						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
