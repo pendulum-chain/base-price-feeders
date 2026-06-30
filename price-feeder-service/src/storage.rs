@@ -90,12 +90,9 @@ impl CoinInfoStorage {
 		let tf = match self.get_timeframe_any(token, blockchain, provider.clone()) {
 			Some(tf) => tf,
 			None => {
-				debug!(
-					"get_timeframe: no entry for {}_{}_{}",
-					token, blockchain, provider
-				);
+				debug!("get_timeframe: no entry for {}_{}_{}", token, blockchain, provider);
 				return None;
-			}
+			},
 		};
 		let now = chrono::Utc::now().timestamp_millis() as u64;
 		let age = now.saturating_sub(tf.last_update_timestamp);
@@ -138,5 +135,4 @@ impl CoinInfoStorage {
 			TimeframeStatus::Fresh(tf)
 		}
 	}
-
 }

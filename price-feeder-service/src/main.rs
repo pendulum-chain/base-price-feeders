@@ -13,8 +13,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 
 use crate::price_updater::{
-	alerts, chain::ChainClient,
-	tx_processor, DarkOracleUpdater, PriceDivergenceAlert,
+	alerts, chain::ChainClient, tx_processor, DarkOracleUpdater, PriceDivergenceAlert,
 	ProviderHierarchy, PythPriceUpdater, UpdateTx,
 };
 
@@ -82,10 +81,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let chain_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
 	let dark_oracle_client = chain_client.clone();
 	let pyth_client = chain_client.clone();
-	let dark_oracle_updater = DarkOracleUpdater::new(
-		dark_oracle_client.clone(),
-		update_interval,
-	)?;
+	let dark_oracle_updater = DarkOracleUpdater::new(dark_oracle_client.clone(), update_interval)?;
 
 	let (update_tx, update_rx) = mpsc::channel::<UpdateTx>(200);
 	let resync_tx = nonce_manager.spawn_resync_handler();
@@ -93,7 +89,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 	tokio::spawn(async move {
 		info!("Starting on-chain transaction processor with embedded watchdog");
-		tx_processor::run_tx_processor(update_rx, resync_tx, nonce_tx_timeout, priority_multiplier).await;
+		tx_processor::run_tx_processor(update_rx, resync_tx, nonce_tx_timeout, priority_multiplier)
+			.await;
 	});
 
 	let fetch_trigger = Arc::new(Notify::new());

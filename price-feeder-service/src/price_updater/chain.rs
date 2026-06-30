@@ -1,5 +1,5 @@
-use alloy::providers::ProviderBuilder;
 use alloy::primitives::{Address, B256};
+use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::{
 	network::{Ethereum, EthereumWallet},
@@ -20,11 +20,11 @@ const TX_RETRY_DELAY_MS: u64 = 250;
 
 const DEFAULT_BASE_FEE_MULTIPLIER: f32 = 7.0;
 
-// Step multipliers applied on top of BASE_FEE_MULTIPLIER. 
+// Step multipliers applied on top of BASE_FEE_MULTIPLIER.
 // Effective priority assuming BASE_FEE_MULTIPLIER = 7.0:
 // Step 0: 7.0 * 1.1 = 7.7
 // Step 1: 7.0 * 1.2 = 8.4
-// Step 2: 7.0 * 1.4 = 9.8	
+// Step 2: 7.0 * 1.4 = 9.8
 // Step 3: 7.0 * 1.5 = 10.5
 // Step 4: 7.0 * 2.0 = 14.0
 // Step 5: 7.0 * 3.0 = 21.0
@@ -45,10 +45,7 @@ impl PriorityFeeMultiplier {
 	pub fn new(base_multiplier: f32) -> Self {
 		Self {
 			base_multiplier,
-			inner: Mutex::new(PriorityFeeInner {
-				step_index: 0,
-				last_bump_at: None,
-			}),
+			inner: Mutex::new(PriorityFeeInner { step_index: 0, last_bump_at: None }),
 		}
 	}
 
@@ -69,10 +66,7 @@ impl PriorityFeeMultiplier {
 		if inner.step_index > 0 {
 			inner.step_index = 0;
 			inner.last_bump_at = None;
-			warn!(
-				"[PriorityFee] Bumped down to multiplier: {}",
-				self.effective_multiplier(0)
-			);
+			warn!("[PriorityFee] Bumped down to multiplier: {}", self.effective_multiplier(0));
 		}
 	}
 
@@ -147,9 +141,10 @@ impl NonceManager {
 		// already in the mempool. Querying the default ("latest") nonce would
 		// ignore those and race against in-flight submissions, causing the
 		// nonce manager to regress below pending transactions.
-		let onchain_nonce = alloy::providers::Provider::get_transaction_count(&provider, self.address)
-			.pending()
-			.await?;
+		let onchain_nonce =
+			alloy::providers::Provider::get_transaction_count(&provider, self.address)
+				.pending()
+				.await?;
 		Ok(onchain_nonce)
 	}
 
@@ -184,8 +179,6 @@ impl NonceManager {
 		tx
 	}
 }
-
-
 
 pub type HttpTransport = alloy::transports::http::Http<reqwest::Client>;
 pub type ChainProvider = FillProvider<
@@ -279,18 +272,26 @@ impl ChainClient {
 		update_interval: std::time::Duration,
 	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
 		let start_time = std::time::Instant::now();
-		let max_elapsed = std::time::Duration::from_secs_f64(update_interval.as_secs_f64() * MAX_ELAPSED_INTERVAL_MULTIPLIER);
+		let max_elapsed = std::time::Duration::from_secs_f64(
+			update_interval.as_secs_f64() * MAX_ELAPSED_INTERVAL_MULTIPLIER,
+		);
 		let mut retries = 0;
 		let mut nonce = self.nonce_manager.next_nonce();
 		loop {
 			let elapsed = start_time.elapsed();
 			if retries > 0 && elapsed >= max_elapsed {
-				return Err(format!("Dropped outdated transaction. Elapsed: {:?}, Max allowed: {:?}", elapsed, max_elapsed).into());
+				return Err(format!(
+					"Dropped outdated transaction. Elapsed: {:?}, Max allowed: {:?}",
+					elapsed, max_elapsed
+				)
+				.into());
 			}
 
 			tx_req.nonce = Some(nonce);
 
-			match alloy::providers::Provider::send_transaction(&*self.provider, tx_req.clone()).await {
+			match alloy::providers::Provider::send_transaction(&*self.provider, tx_req.clone())
+				.await
+			{
 				Ok(pending_tx) => return Ok(*pending_tx.tx_hash()),
 				Err(e) => {
 					retries += 1;
@@ -303,17 +304,19 @@ impl ChainClient {
 						// Use the "pending" nonce to account for txs already in
 						// the node's mempool; otherwise we'd skip in-flight txs.
 						let chain_nonce = alloy::providers::Provider::get_transaction_count(
-							&*self.provider, self.address
+							&*self.provider,
+							self.address,
 						)
-							.pending()
-							.await?;
+						.pending()
+						.await?;
 						self.nonce_manager.sync_nonce(chain_nonce);
 						nonce = self.nonce_manager.next_nonce();
 					} else {
 						log::warn!("Tx error: {}. Retrying {}/5...", err_msg, retries);
-						tokio::time::sleep(std::time::Duration::from_millis(TX_RETRY_DELAY_MS)).await;
+						tokio::time::sleep(std::time::Duration::from_millis(TX_RETRY_DELAY_MS))
+							.await;
 					}
-				}
+				},
 			}
 		}
 	}

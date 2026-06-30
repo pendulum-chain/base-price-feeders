@@ -4,9 +4,10 @@ use crate::api::coingecko::CoingeckoPriceApi;
 use crate::api::error::{BinanceError, CoinbaseError, CoingeckoError, FastForexError};
 use crate::api::fastforex::FastForexPriceApi;
 use crate::args::{CoingeckoConfig, FastForexConfig};
-use crate::types::Quotation;
+use crate::types::{Aggregator, Quotation};
 use crate::AssetSpecifier;
-use async_trait::async_trait;
+use std::future::Future;
+use std::pin::Pin;
 
 pub mod binance;
 pub mod coinbase;
@@ -16,13 +17,18 @@ pub mod fastforex;
 
 #[derive(Debug, Default)]
 pub struct QuotationsOutcome {
+	pub provider: Aggregator,
 	pub quotations: Vec<Quotation>,
 	pub had_error: bool,
 }
 
-#[async_trait]
+pub type QuotationsFuture<'a> = Pin<Box<dyn Future<Output = QuotationsOutcome> + Send + 'a>>;
+
 pub trait PriceApi {
-	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> QuotationsOutcome;
+	fn get_quotation_futures<'a>(
+		&'a self,
+		assets: Vec<&'a AssetSpecifier>,
+	) -> Vec<QuotationsFuture<'a>>;
 }
 
 pub struct PriceApiImpl {
@@ -33,7 +39,11 @@ pub struct PriceApiImpl {
 }
 
 impl PriceApiImpl {
-	pub fn new(coingecko_config: CoingeckoConfig, fastforex_config: FastForexConfig, brl_bps_adjustment: i64) -> Self {
+	pub fn new(
+		coingecko_config: CoingeckoConfig,
+		fastforex_config: FastForexConfig,
+		brl_bps_adjustment: i64,
+	) -> Self {
 		Self {
 			binance_price_api: BinancePriceApi::new(brl_bps_adjustment),
 			coinbase_price_api: CoinbasePriceApi::new(),
@@ -43,12 +53,11 @@ impl PriceApiImpl {
 	}
 }
 
-#[async_trait]
 impl PriceApi for PriceApiImpl {
-	async fn get_quotations(&self, assets: Vec<&AssetSpecifier>) -> QuotationsOutcome {
-		let mut quotations = Vec::new();
-		let mut had_error = false;
-
+	fn get_quotation_futures<'a>(
+		&'a self,
+		assets: Vec<&'a AssetSpecifier>,
+	) -> Vec<QuotationsFuture<'a>> {
 		let binance_assets: Vec<&AssetSpecifier> = assets
 			.iter()
 			.copied()
@@ -73,47 +82,76 @@ impl PriceApi for PriceApiImpl {
 			.filter(|asset| FastForexPriceApi::is_supported(asset))
 			.collect();
 
-
-		let (binance_quotes, coinbase_quotes, coingecko_quotes, fastforex_quotes) = tokio::join!(
-			self.get_binance_quotations(binance_assets),
-			self.get_coinbase_quotations(coinbase_assets),
-			self.get_coingecko_quotations(coingecko_assets),
-			self.get_fastforex_quotations(fastforex_assets),
-		);
-
-		match binance_quotes {
-			Ok(binance_quotes) => quotations.extend(binance_quotes),
-			Err(e) => {
-				log::error!("Error getting Binance quotations: {}", e);
-				had_error = true;
-			},
-		}
-
-		match coinbase_quotes {
-			Ok(coinbase_quotes) => quotations.extend(coinbase_quotes),
-			Err(e) => {
-				log::error!("Error getting Coinbase quotations: {}", e);
-				had_error = true;
-			},
-		}
-
-		match coingecko_quotes {
-			Ok(coingecko_quotes) => quotations.extend(coingecko_quotes),
-			Err(e) => {
-				log::error!("Error getting CoinGecko quotations: {:?}", e);
-				had_error = true;
-			},
-		}
-
-		match fastforex_quotes {
-			Ok(fastforex_quotes) => quotations.extend(fastforex_quotes),
-			Err(e) => {
-				log::error!("Error getting FastForex quotations: {}", e);
-				had_error = true;
-			},
-		}
-
-		QuotationsOutcome { quotations, had_error }
+		vec![
+			Box::pin(async move {
+				match self.get_binance_quotations(binance_assets).await {
+					Ok(quotations) => QuotationsOutcome {
+						provider: Aggregator::Binance,
+						quotations,
+						had_error: false,
+					},
+					Err(e) => {
+						log::error!("Error getting Binance quotations: {}", e);
+						QuotationsOutcome {
+							provider: Aggregator::Binance,
+							quotations: Vec::new(),
+							had_error: true,
+						}
+					},
+				}
+			}),
+			Box::pin(async move {
+				match self.get_coinbase_quotations(coinbase_assets).await {
+					Ok(quotations) => QuotationsOutcome {
+						provider: Aggregator::Coinbase,
+						quotations,
+						had_error: false,
+					},
+					Err(e) => {
+						log::error!("Error getting Coinbase quotations: {}", e);
+						QuotationsOutcome {
+							provider: Aggregator::Coinbase,
+							quotations: Vec::new(),
+							had_error: true,
+						}
+					},
+				}
+			}),
+			Box::pin(async move {
+				match self.get_coingecko_quotations(coingecko_assets).await {
+					Ok(quotations) => QuotationsOutcome {
+						provider: Aggregator::Coingecko,
+						quotations,
+						had_error: false,
+					},
+					Err(e) => {
+						log::error!("Error getting CoinGecko quotations: {:?}", e);
+						QuotationsOutcome {
+							provider: Aggregator::Coingecko,
+							quotations: Vec::new(),
+							had_error: true,
+						}
+					},
+				}
+			}),
+			Box::pin(async move {
+				match self.get_fastforex_quotations(fastforex_assets).await {
+					Ok(quotations) => QuotationsOutcome {
+						provider: Aggregator::FastForex,
+						quotations,
+						had_error: false,
+					},
+					Err(e) => {
+						log::error!("Error getting FastForex quotations: {}", e);
+						QuotationsOutcome {
+							provider: Aggregator::FastForex,
+							quotations: Vec::new(),
+							had_error: true,
+						}
+					},
+				}
+			}),
+		]
 	}
 }
 

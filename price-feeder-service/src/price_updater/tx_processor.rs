@@ -14,8 +14,8 @@ use tokio::sync::{mpsc, Mutex};
 use crate::price_updater::alerts;
 use crate::price_updater::chain::PriorityFeeMultiplier;
 
-	const MAX_TRACKED_TXS: usize = 100;
-	const RESYNC_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
+const MAX_TRACKED_TXS: usize = 100;
+const RESYNC_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy)]
 pub enum UpdateTxKind {

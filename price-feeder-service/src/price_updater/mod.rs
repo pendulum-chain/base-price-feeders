@@ -18,6 +18,7 @@ use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
 use alloy::primitives::B256;
 use configs::HierarchyEntry;
+use futures::stream::{FuturesUnordered, StreamExt};
 use helpers::{convert_to_coin_info, BIPS_DIVISOR};
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
@@ -35,7 +36,7 @@ const DISABLE_FAILURE_THRESHOLD: u8 = 3;
 // Backoff between disable-tx resubmissions while we wait for an on-chain
 const DISABLE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 
-// The longer this value, the "oldest" the price feed at the time of feeding it. But if a fetch cycle 
+// The longer this value, the "oldest" the price feed at the time of feeding it. But if a fetch cycle
 // ends up taking longer, we missed the cycle and the feed process uses prices from previous iteration.
 pub const FETCH_LEAD_TIME: std::time::Duration = std::time::Duration::from_millis(700);
 
@@ -318,9 +319,7 @@ async fn handle_asset_exhausted(
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
-
-
-/// The fetch loop runs **on demand**: it sleeps until either the feed loop signals 
+/// The fetch loop runs **on demand**: it sleeps until either the feed loop signals
 //       via `fetch_trigger` (the normal case, scheduled
 ///      to fire `FETCH_LEAD_TIME` before each feed tick), or
 ///
@@ -338,20 +337,16 @@ pub async fn run_fetch_loop<T>(
 where
 	T: PriceApi + Send + Sync + 'static,
 {
-
-	let _ = run_single_fetch(&storage, &supported_currencies, &api).await;
-
+	let _ = run_single_fetch(&storage, &supported_currencies, update_interval, &api).await;
 
 	loop {
-
 		fetch_trigger.notified().await;
 
 		// Run fetches; on any provider error, retry immediately without
 		// waiting for the next trigger.
 		loop {
-			let fetch_start = tokio::time::Instant::now();
-
-			let had_error = run_single_fetch(&storage, &supported_currencies, &api).await;
+			let had_error =
+				run_single_fetch(&storage, &supported_currencies, update_interval, &api).await;
 			if !had_error {
 				break;
 			}
@@ -365,6 +360,7 @@ where
 async fn run_single_fetch<T>(
 	storage: &Arc<CoinInfoStorage>,
 	supported_currencies: &HashSet<AssetSpecifier>,
+	update_interval: std::time::Duration,
 	api: &T,
 ) -> bool
 where
@@ -376,16 +372,28 @@ where
 	let storage_pyth = storage.clone();
 
 	let quotations_future = async {
-		let outcome = api.get_quotations(assets_refs).await;
-		for q in outcome.quotations {
-			match convert_to_coin_info(q.clone()) {
-				Ok(ci) => {
-					storage.update_timeframe(ci);
-				},
-				Err(e) => error!("Error converting to CoinInfo: {:#?}", e),
-			}
+		let mut futures = FuturesUnordered::new();
+		for future in api.get_quotation_futures(assets_refs) {
+			futures.push(future);
 		}
-		outcome.had_error
+
+		let mut had_error = false;
+		while let Some(outcome) = futures.next().await {
+			for q in outcome.quotations {
+				match convert_to_coin_info(q.clone()) {
+					Ok(ci) => {
+						storage.update_timeframe(ci);
+					},
+					Err(e) => error!("Error converting to CoinInfo: {:#?}", e),
+				}
+			}
+			if outcome.had_error {
+				had_error = true;
+			}
+			debug!("{} quotations fetch completed", outcome.provider);
+		}
+
+		had_error
 	};
 
 	// Fetch Pyth prices. Purely for storage update as coinbase/coingecko final backups.
@@ -419,7 +427,18 @@ where
 		}
 	};
 
-	let (quotations_err, pyth_err) = tokio::join!(quotations_future, pyth_future);
+	let quotations_timeout = tokio::time::timeout(update_interval, quotations_future);
+	let (quotations_err, pyth_err) = tokio::join!(quotations_timeout, pyth_future);
+	let quotations_err = match quotations_err {
+		Ok(had_error) => had_error,
+		Err(_) => {
+			error!(
+				"Timed out waiting for all API provider fetches after {:?}; completed provider results were already stored",
+				update_interval
+			);
+			true
+		},
+	};
 	let had_error = quotations_err || pyth_err;
 	debug!("run_single_fetch completed in {:?} (had_error: {})", start.elapsed(), had_error);
 
@@ -483,11 +502,7 @@ pub async fn run_feed_loop(
 				} else {
 					asset.blockchain.as_str()
 				};
-				match storage.get_timeframe_status(
-					&asset.symbol,
-					blockchain,
-					aggregator.clone(),
-				) {
+				match storage.get_timeframe_status(&asset.symbol, blockchain, aggregator.clone()) {
 					TimeframeStatus::Fresh(tf) => {
 						selected_tf = Some(tf);
 						break;
@@ -632,11 +647,7 @@ fn schedule_fetch_trigger(
 }
 
 /// Forwards a transaction hash to the tx_processor channel via `try_send`.
-fn send_tx(
-	tx: &mpsc::Sender<Tx>,
-	kind: TxKind,
-	tx_hash: B256,
-) {
+fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 	if let Err(e) = tx.try_send(Tx { kind, tx_hash }) {
 		match e {
 			mpsc::error::TrySendError::Full(_) => {

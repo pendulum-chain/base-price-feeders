@@ -122,11 +122,7 @@ impl CoingeckoClient {
 		let client =
 			reqwest::Client::builder().build().map_err(|e| CoingeckoError(e.to_string()))?;
 
-		Ok(CoingeckoClient {
-			client,
-			host,
-			api_key,
-		})
+		Ok(CoingeckoClient { client, host, api_key })
 	}
 
 	async fn get<R: DeserializeOwned>(&self, endpoint: &str) -> Result<R, CoingeckoError> {
