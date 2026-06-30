@@ -223,11 +223,7 @@ pub fn get_configured_registration_metadata(symbol: &str) -> Option<AssetMetadat
 	match parse_registration_metadata_config(symbol, &raw) {
 		Ok(meta) => meta,
 		Err(e) => {
-			log::error!(
-				"Failed to parse ASSET_REGISTRATION_METADATA for {}: {:?}",
-				symbol,
-				e
-			);
+			log::error!("Failed to parse ASSET_REGISTRATION_METADATA for {}: {:?}", symbol, e);
 			None
 		},
 	}

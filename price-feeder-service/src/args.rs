@@ -53,6 +53,10 @@ pub struct DiaApiArgs {
 	#[clap(long, env = "BRL_BPS_ADJUSTMENT", default_value = "0")]
 	pub brl_bps_adjustment: i64,
 
+	/// Timeout (in seconds) for transaction confirmation before triggering nonce re-sync
+	#[clap(long, env = "NONCE_TX_TIMEOUT_SECS", default_value = "8")]
+	pub nonce_tx_timeout_secs: u64,
+
 	#[clap(flatten)]
 	pub coingecko: CoingeckoConfig,
 

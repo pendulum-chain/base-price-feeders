@@ -182,9 +182,11 @@ impl PythPriceUpdater {
 			.updatePriceFeeds(bytes_data)
 			.value(update_fee)
 			.gas(1_000_000)
-			.max_priority_fee_per_gas(priority_fee * 20);
+			.max_priority_fee_per_gas(priority_fee);
 
-		let tx_hash = client.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval).await?;
+		let tx_hash = client
+			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
+			.await?;
 
 		Ok(tx_hash)
 	}
