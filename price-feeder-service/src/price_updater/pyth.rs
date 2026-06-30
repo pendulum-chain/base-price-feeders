@@ -1,9 +1,9 @@
-use super::chain::{ChainClient, PriceData};
+use super::chain::{ChainClient, PriceData, SentTx};
 use alloy::{
-	primitives::{Address, Bytes, B256},
+	primitives::{Address, Bytes},
 	sol,
 };
-use log::{debug, error, info};
+use log::{debug, info};
 use serde::Deserialize;
 use std::error::Error;
 use std::sync::Arc;
@@ -136,7 +136,7 @@ impl PythPriceUpdater {
 		&mut self,
 		client: Arc<ChainClient>,
 		supported_currencies: &HashSet<AssetSpecifier>,
-	) -> Result<(Option<B256>, PriceData), Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<(Option<SentTx>, PriceData), Box<dyn Error + Send + Sync + 'static>> {
 		let should_update_contract = match self.last_update {
 			None => true,
 			Some(t) => t.elapsed() >= self.update_interval,
@@ -144,7 +144,7 @@ impl PythPriceUpdater {
 
 		let (data, price_data) = fetch_pyth_prices(supported_currencies).await?;
 
-		let tx_hash = if should_update_contract {
+		let sent_tx = if should_update_contract {
 			let bytes_data: Result<Vec<Bytes>, _> = data
 				.binary
 				.data
@@ -158,21 +158,21 @@ impl PythPriceUpdater {
 				.collect();
 			let bytes_data = bytes_data?;
 
-			let hash = self.update_contract(bytes_data, client).await?;
+			let sent = self.update_contract(bytes_data, client).await?;
 			self.last_update = Some(std::time::Instant::now());
-			Some(hash)
+			Some(sent)
 		} else {
 			None
 		};
 
-		Ok((tx_hash, price_data))
+		Ok((sent_tx, price_data))
 	}
 
 	async fn update_contract(
 		&self,
 		bytes_data: Vec<Bytes>,
 		client: Arc<ChainClient>,
-	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<SentTx, Box<dyn Error + Send + Sync + 'static>> {
 		let pyth_adapter = PythAdapter::new(self.adapter_address, &*client.provider);
 		let update_fee = pyth_adapter.getUpdateFee(bytes_data.clone()).call().await?.updateFee_;
 		let priority_fee = client.estimate_priority_fee().await?;
@@ -184,10 +184,10 @@ impl PythPriceUpdater {
 			.gas(1_000_000)
 			.max_priority_fee_per_gas(priority_fee);
 
-		let tx_hash = client
+		let sent_tx = client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
 			.await?;
 
-		Ok(tx_hash)
+		Ok(sent_tx)
 	}
 }

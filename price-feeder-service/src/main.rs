@@ -12,6 +12,7 @@ use log::{error, info};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 
+use crate::price_updater::tx_processor::ReplaceRequest;
 use crate::price_updater::{
 	alerts, chain::ChainClient, tx_processor, DarkOracleUpdater, PriceDivergenceAlert,
 	ProviderHierarchy, PythPriceUpdater, UpdateTx,
@@ -84,13 +85,26 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let dark_oracle_updater = DarkOracleUpdater::new(dark_oracle_client.clone(), update_interval)?;
 
 	let (update_tx, update_rx) = mpsc::channel::<UpdateTx>(200);
+	// Hybrid tx recovery: the watchdog signals same-nonce replacements to
+	// the feed loop through this channel. Bounded so a stuck feed loop
+	// can't be drowned by replacements; full → watchdog falls back to
+	// resync (see tx_processor::run_tx_processor).
+	let (replace_tx, replace_rx) = mpsc::channel::<ReplaceRequest>(20);
 	let resync_tx = nonce_manager.spawn_resync_handler();
 	let priority_multiplier = chain_client.priority_multiplier.clone();
+	let replacement_resync_tx = resync_tx.clone();
+	let replacement_priority_multiplier = priority_multiplier.clone();
 
 	tokio::spawn(async move {
 		info!("Starting on-chain transaction processor with embedded watchdog");
-		tx_processor::run_tx_processor(update_rx, resync_tx, nonce_tx_timeout, priority_multiplier)
-			.await;
+		tx_processor::run_tx_processor(
+			update_rx,
+			resync_tx,
+			replace_tx,
+			nonce_tx_timeout,
+			priority_multiplier,
+		)
+		.await;
 	});
 
 	let fetch_trigger = Arc::new(Notify::new());
@@ -132,6 +146,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			pyth_updater,
 			pyth_client,
 			fetch_trigger,
+			replace_rx,
+			replacement_resync_tx,
+			replacement_priority_multiplier,
 		)
 		.await;
 	});

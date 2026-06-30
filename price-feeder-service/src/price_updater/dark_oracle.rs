@@ -8,7 +8,7 @@ use std::convert::TryFrom;
 use std::error::Error;
 use std::sync::Arc;
 
-use super::chain::{ChainClient, ChainProvider, HttpTransport, PriceData};
+use super::chain::{ChainClient, ChainProvider, HttpTransport, PriceData, SentTx};
 use super::configs;
 use crate::types::CoinInfo;
 
@@ -96,7 +96,8 @@ impl DarkOracleUpdater {
 		let tx_hash = self
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
-			.await?;
+			.await?
+			.tx_hash;
 		Ok((tx_hash, meta))
 	}
 
@@ -133,14 +134,15 @@ impl DarkOracleUpdater {
 		let tx_hash = self
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
-			.await?;
+			.await?
+			.tx_hash;
 		Ok(tx_hash)
 	}
 
 	pub async fn update_prices(
 		&self,
 		currencies: &Vec<CoinInfo>,
-	) -> Result<(B256, PriceData), Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<(SentTx, PriceData), Box<dyn Error + Send + Sync + 'static>> {
 		info!("Starting DarkOracle contract price update...");
 
 		let symbol_to_price: HashMap<&str, u128> =
@@ -189,7 +191,7 @@ impl DarkOracleUpdater {
 			.gas(1_000_000)
 			.max_priority_fee_per_gas(priority_fee);
 
-		let tx_hash = self
+		let sent_tx = self
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
 			.await?;
@@ -201,6 +203,6 @@ impl DarkOracleUpdater {
 
 		let price_data = PriceData { prices: prices_map };
 
-		Ok((tx_hash, price_data))
+		Ok((sent_tx, price_data))
 	}
 }

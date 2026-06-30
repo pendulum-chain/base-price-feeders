@@ -1,5 +1,6 @@
 use alloy::primitives::{Address, B256};
 use alloy::providers::ProviderBuilder;
+use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::{
 	network::{Ethereum, EthereumWallet},
@@ -17,6 +18,18 @@ use tokio::sync::mpsc;
 
 const MAX_ELAPSED_INTERVAL_MULTIPLIER: f64 = 0.5;
 const TX_RETRY_DELAY_MS: u64 = 250;
+
+/// EIP-1559 replacement fee bump factor applied on top of the current network
+/// estimate. The replacement tx must have strictly higher `max_fee_per_gas` and
+/// `max_priority_fee_per_gas` than the original; 1.25× (25 %) is well above the
+/// 10 % minimum required by the mempool rules. The replacement builder also
+/// floors each field at 1.125× the tracked old fee to defend against a network
+/// fee drop between submit and timeout.
+const REPLACEMENT_FEE_BUMP: f64 = 1.25;
+/// Minimum bump over the tracked old fees, applied to both EIP-1559 fields
+/// when the *current* estimate × `REPLACEMENT_FEE_BUMP` is not enough on its
+/// own (network fees dropped between submit and timeout).
+const REPLACEMENT_FEE_FLOOR: f64 = 1.125;
 
 const DEFAULT_BASE_FEE_MULTIPLIER: f32 = 7.0;
 
@@ -268,9 +281,9 @@ impl ChainClient {
 
 	pub async fn send_tx_with_retry(
 		&self,
-		mut tx_req: alloy::rpc::types::TransactionRequest,
+		mut tx_req: TransactionRequest,
 		update_interval: std::time::Duration,
-	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<SentTx, Box<dyn Error + Send + Sync + 'static>> {
 		let start_time = std::time::Instant::now();
 		let max_elapsed = std::time::Duration::from_secs_f64(
 			update_interval.as_secs_f64() * MAX_ELAPSED_INTERVAL_MULTIPLIER,
@@ -289,10 +302,66 @@ impl ChainClient {
 
 			tx_req.nonce = Some(nonce);
 
+			// Track the fees we are actually submitting with. If the caller
+			// did not set `max_fee_per_gas` explicitly (the common case: the
+			// GasFiller would otherwise fill it post-submit and we would not be
+			// able to track the value), estimate it now and stamp it onto the
+			// request. This is required for hybrid recovery: the watchdog
+			// needs the old fees in order to compute a same-nonce replacement
+			// bump.
+			let tracked_max_priority_fee_per_gas = tx_req.max_priority_fee_per_gas.unwrap_or(0);
+			let tracked_max_fee_per_gas = match tx_req.max_fee_per_gas {
+				Some(v) => {
+					let max_fee = v.max(tracked_max_priority_fee_per_gas);
+					tx_req.max_fee_per_gas = Some(max_fee);
+					max_fee
+				},
+				None => {
+					let fees = match alloy::providers::Provider::estimate_eip1559_fees(
+						&*self.provider,
+						None,
+					)
+					.await
+					{
+						Ok(fees) => fees,
+						Err(e) => {
+							retries += 1;
+							if retries > 5 {
+								return Err(e.into());
+							}
+							log::warn!(
+								"Failed to estimate EIP-1559 fees before submit: {}. Retrying {}/5...",
+								e,
+								retries
+							);
+							tokio::time::sleep(std::time::Duration::from_millis(TX_RETRY_DELAY_MS))
+								.await;
+							continue;
+						},
+					};
+					let max_fee = max_fee_with_priority_headroom(
+						fees.max_fee_per_gas,
+						fees.max_priority_fee_per_gas,
+						tracked_max_priority_fee_per_gas,
+					);
+					tx_req.max_fee_per_gas = Some(max_fee);
+					max_fee
+				},
+			};
+
+			let request_template = Arc::new(tx_req.clone());
 			match alloy::providers::Provider::send_transaction(&*self.provider, tx_req.clone())
 				.await
 			{
-				Ok(pending_tx) => return Ok(*pending_tx.tx_hash()),
+				Ok(pending_tx) => {
+					return Ok(SentTx {
+						tx_hash: *pending_tx.tx_hash(),
+						nonce,
+						max_priority_fee_per_gas: tracked_max_priority_fee_per_gas,
+						max_fee_per_gas: tracked_max_fee_per_gas,
+						request_template,
+					});
+				},
 				Err(e) => {
 					retries += 1;
 					if retries > 5 {
@@ -320,6 +389,53 @@ impl ChainClient {
 			}
 		}
 	}
+
+	/// Submit a same-nonce replacement for a stuck price-update tx. The
+	/// `nonce` is reused from the tracked original; `NonceManager` is **not**
+	/// touched (we are not allocating a new nonce, we are overwriting a
+	/// mempool entry at an existing nonce).
+	///
+	/// Bumps both EIP-1559 fee fields by `REPLACEMENT_FEE_BUMP` over the
+	/// current network estimate (priority also scaled by the active
+	/// `priority_multiplier` step) and floors each field at
+	/// `REPLACEMENT_FEE_FLOOR` over the tracked old fees — this guards
+	/// against a network fee drop between submit and timeout producing a
+	/// sub-spec replacement.
+	///
+	/// If the original tx already confirmed in the meantime, the RPC will
+	/// return "nonce too low"; the caller should treat that as harmless
+	/// (the original data is on-chain, which is the correct outcome).
+	pub async fn send_replacement_tx(
+		&self,
+		mut tx_req: TransactionRequest,
+		nonce: u64,
+		old_max_priority_fee_per_gas: u128,
+		old_max_fee_per_gas: u128,
+	) -> Result<SentTx, Box<dyn Error + Send + Sync + 'static>> {
+		tx_req.nonce = Some(nonce);
+
+		let fees = alloy::providers::Provider::estimate_eip1559_fees(&*self.provider, None).await?;
+		let mult = self.priority_multiplier.get();
+		let (new_priority, new_max_fee) = compute_replacement_fees(
+			old_max_priority_fee_per_gas,
+			old_max_fee_per_gas,
+			fees.max_priority_fee_per_gas,
+			fees.max_fee_per_gas,
+			mult,
+		);
+		tx_req.max_priority_fee_per_gas = Some(new_priority);
+		tx_req.max_fee_per_gas = Some(new_max_fee);
+		let request_template = Arc::new(tx_req.clone());
+
+		let pending = alloy::providers::Provider::send_transaction(&*self.provider, tx_req).await?;
+		Ok(SentTx {
+			tx_hash: *pending.tx_hash(),
+			nonce,
+			max_priority_fee_per_gas: new_priority,
+			max_fee_per_gas: new_max_fee,
+			request_template,
+		})
+	}
 }
 
 use std::collections::HashMap;
@@ -327,6 +443,77 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct PriceData {
 	pub prices: HashMap<String, f64>,
+}
+
+/// Metadata returned by `send_tx_with_retry` and `send_replacement_tx` so the
+/// caller (and the tx_processor tracking layer) knows the exact fees used and
+/// the nonce the tx was submitted at. All fields are populated for every
+/// successful submission: when the original request did not have explicit
+/// `max_fee_per_gas`, the sender fills it from `estimate_eip1559_fees` before
+/// submitting, so the tracked value is always non-zero and trustworthy for
+/// later same-nonce replacement.
+#[derive(Debug, Clone)]
+pub struct SentTx {
+	pub tx_hash: B256,
+	pub nonce: u64,
+	pub max_priority_fee_per_gas: u128,
+	pub max_fee_per_gas: u128,
+	pub request_template: Arc<TransactionRequest>,
+}
+
+/// Computes EIP-1559 replacement fees for a same-nonce replacement.
+///
+/// Both new fields are required to be at least the bumped target. The
+/// replacement therefore takes the max of two candidates:
+///   - `current_estimate * REPLACEMENT_FEE_BUMP` (priority also scaled by the
+///     active `priority_multiplier` step), and
+///   - `old_fee * REPLACEMENT_FEE_FLOOR` (so a network fee drop between
+///     submit and timeout cannot silently produce a sub-spec replacement).
+///
+/// `max_priority_fee_per_gas` is then capped to `max_fee_per_gas` (EIP-1559
+/// invariant: priority ≤ max). All math is in `f64`; outputs are
+/// `ceil`'d before the `u128` cast so the "at least" guarantee survives
+/// floating-point rounding, and clamped to `u128::MAX` to avoid overflow.
+pub(crate) fn compute_replacement_fees(
+	old_max_priority_fee_per_gas: u128,
+	old_max_fee_per_gas: u128,
+	current_priority_estimate: u128,
+	current_max_fee_estimate: u128,
+	priority_multiplier: f32,
+) -> (u128, u128) {
+	let mult = priority_multiplier as f64;
+	let current_priority = (current_priority_estimate as f64) * mult;
+	let priority_delta = current_priority - (current_priority_estimate as f64);
+	let current_max_fee = (current_max_fee_estimate as f64) + priority_delta.max(0.0);
+
+	let bumped_priority = current_priority * REPLACEMENT_FEE_BUMP;
+	let bumped_max_fee = current_max_fee * REPLACEMENT_FEE_BUMP;
+
+	let min_priority = (old_max_priority_fee_per_gas as f64) * REPLACEMENT_FEE_FLOOR;
+	let min_max_fee = (old_max_fee_per_gas as f64) * REPLACEMENT_FEE_FLOOR;
+
+	let final_priority = bumped_priority.max(min_priority);
+	let final_max_fee = bumped_max_fee.max(min_max_fee);
+
+	// priority ≤ max_fee (EIP-1559 invariant).
+	let final_priority = final_priority.min(final_max_fee);
+
+	let final_priority =
+		if final_priority > u128::MAX as f64 { u128::MAX } else { final_priority.ceil() as u128 };
+	let final_max_fee =
+		if final_max_fee > u128::MAX as f64 { u128::MAX } else { final_max_fee.ceil() as u128 };
+
+	(final_priority, final_max_fee)
+}
+
+fn max_fee_with_priority_headroom(
+	estimated_max_fee_per_gas: u128,
+	estimated_max_priority_fee_per_gas: u128,
+	actual_max_priority_fee_per_gas: u128,
+) -> u128 {
+	estimated_max_fee_per_gas.saturating_add(
+		actual_max_priority_fee_per_gas.saturating_sub(estimated_max_priority_fee_per_gas),
+	)
 }
 
 #[cfg(test)]
@@ -389,5 +576,66 @@ mod tests {
 
 		pf.bump_down();
 		assert!(approx_eq(pf.get(), 7.7));
+	}
+
+	// ── compute_replacement_fees tests ─────────────────────────────────────
+
+	#[test]
+	fn replacement_fees_bump_above_estimate_and_floor() {
+		// Old fees are low; current estimate * 1.25 dominates. Priority
+		// is also scaled by the multiplier (BASE * PRIORITY_FEE_STEPS[0]
+		// = 7.7 at the default step).
+		let (prio, max_fee) = compute_replacement_fees(100, 1_000, 1_000, 10_000, 7.7);
+		// priority: max(1000 * 7.7 * 1.25, 100 * 1.125) = max(9625, 112.5) = 9625
+		assert_eq!(prio, 9_625);
+		// max_fee preserves the RPC estimate's base-fee headroom before applying the bump:
+		// max((10_000 + (7_700 - 1_000)) * 1.25, 1_000 * 1.125) = 20_875
+		assert_eq!(max_fee, 20_875);
+	}
+
+	#[test]
+	fn replacement_fees_floor_when_network_fee_dropped() {
+		// Network estimate dropped dramatically between submit and timeout;
+		// we must still beat the old fees by 12.5% to be EIP-1559 compliant.
+		let (prio, max_fee) = compute_replacement_fees(10_000, 100_000, 100, 200, 7.7);
+		// priority: max(100 * 7.7 * 1.25, 10_000 * 1.125) = max(962.5, 11_250) = 11_250
+		assert_eq!(prio, 11_250);
+		// max_fee: max(200 * 1.25, 100_000 * 1.125) = max(250, 112_500) = 112_500
+		assert_eq!(max_fee, 112_500);
+	}
+
+	#[test]
+	fn replacement_priority_capped_by_max_fee() {
+		// Make priority candidate exceed max_fee candidate to verify cap.
+		// old_prio huge vs old_max_fee small; multiplier 1.0 to keep math simple.
+		let (prio, max_fee) = compute_replacement_fees(u128::MAX / 4, 1, 1, 1, 1.0);
+		// max_fee from ceil'd max(1*1.25, 1*1.125) = ceil(1.25) = 2
+		assert_eq!(max_fee, 2);
+		// priority from huge floor, capped to max_fee = 2
+		assert_eq!(prio, 2);
+	}
+
+	#[test]
+	fn replacement_fees_meet_minimum_12_5_percent_bump() {
+		// Sanity: any (old, current) pair yields a replacement fee that
+		// is at least 1.125 * old in both fields (the user's "bump by at
+		// least 12.5%" requirement).
+		let (prio, max_fee) = compute_replacement_fees(1_000_000, 10_000_000, 2_000, 20_000, 1.0);
+		// priority: max(2000 * 1.25, 1_000_000 * 1.125) = max(2500, 1_125_000) = 1_125_000
+		assert_eq!(prio, 1_125_000);
+		assert!(prio >= (1_125_000_u128));
+		// max_fee: max(20_000 * 1.25, 10_000_000 * 1.125) = max(25_000, 11_250_000) = 11_250_000
+		assert_eq!(max_fee, 11_250_000);
+		assert!(max_fee >= (11_250_000_u128));
+	}
+
+	#[test]
+	fn max_fee_preserves_priority_headroom_when_priority_is_scaled() {
+		assert_eq!(max_fee_with_priority_headroom(10_000, 1_000, 7_700), 16_700);
+	}
+
+	#[test]
+	fn max_fee_unchanged_when_priority_is_not_above_estimate() {
+		assert_eq!(max_fee_with_priority_headroom(10_000, 1_000, 500), 10_000);
 	}
 }

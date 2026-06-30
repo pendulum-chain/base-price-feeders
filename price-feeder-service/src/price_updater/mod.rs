@@ -16,7 +16,6 @@ use crate::api::PriceApi;
 use crate::storage::{CoinInfoStorage, TimeframeStatus};
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
-use alloy::primitives::B256;
 use configs::HierarchyEntry;
 use futures::stream::{FuturesUnordered, StreamExt};
 use helpers::{convert_to_coin_info, BIPS_DIVISOR};
@@ -25,7 +24,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
-use tx_processor::{ConfirmOutcome, UpdateTx as Tx, UpdateTxKind as TxKind};
+use tx_processor::{ConfirmOutcome, ReplaceRequest, UpdateTx as Tx, UpdateTxKind as TxKind};
 
 pub use configs::ProviderHierarchy;
 
@@ -455,6 +454,9 @@ pub async fn run_feed_loop(
 	mut pyth_updater: PythPriceUpdater,
 	pyth_client: Arc<ChainClient>,
 	fetch_trigger: Arc<Notify>,
+	replace_rx: mpsc::Receiver<ReplaceRequest>,
+	resync_tx: mpsc::Sender<()>,
+	priority_multiplier: Arc<chain::PriorityFeeMultiplier>,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 	info!("Starting feed loop");
 
@@ -463,6 +465,24 @@ pub async fn run_feed_loop(
 	let startup_reconciled_assets = Arc::new(tokio::sync::Mutex::new(HashSet::<String>::new()));
 	let hierarchy = ProviderHierarchy::default();
 	let update_interval = dark_oracle_updater.get_update_interval();
+
+	// Spawn the replacement handler for the lifetime of the feed loop. It
+	// receives `ReplaceRequest`s from the tx_processor watchdog and
+	// re-submits the same-kind price update at the tracked nonce with
+	// bumped fees.
+	{
+		let pyth_client = pyth_client.clone();
+		let update_tx = update_tx.clone();
+		let resync_tx = resync_tx.clone();
+		let priority_multiplier = priority_multiplier.clone();
+		tokio::spawn(replacement_handler(
+			replace_rx,
+			pyth_client,
+			update_tx,
+			resync_tx,
+			priority_multiplier,
+		));
+	}
 
 	loop {
 		let feed_start = tokio::time::Instant::now();
@@ -475,9 +495,9 @@ pub async fn run_feed_loop(
 
 		let pyth_future = async {
 			match pyth_updater.run_update(pyth_client.clone(), &supported_currencies).await {
-				Ok((tx_hash_opt, price_data)) => {
-					if let Some(tx_hash) = tx_hash_opt {
-						send_tx(&update_tx, TxKind::Pyth, tx_hash);
+				Ok((sent_tx_opt, _price_data)) => {
+					if let Some(sent_tx) = sent_tx_opt {
+						send_tx(&update_tx, sent_tx, TxKind::Pyth);
 					}
 				},
 				Err(e) => {
@@ -569,8 +589,8 @@ pub async fn run_feed_loop(
 				info!("Pushing prices to DarkOracle on-chain from providers: {}", provider_summary);
 
 				match dark_oracle_updater.update_prices(&currencies_to_feed).await {
-					Ok((tx_hash, price_data)) => {
-						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
+					Ok((sent_tx, price_data)) => {
+						send_tx(&update_tx, sent_tx, TxKind::DarkOracle);
 
 						// Price divergence validation for EURC
 						let pyth_eurc_tf =
@@ -646,9 +666,18 @@ fn schedule_fetch_trigger(
 	});
 }
 
-/// Forwards a transaction hash to the tx_processor channel via `try_send`.
-fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
-	if let Err(e) = tx.try_send(Tx { kind, tx_hash }) {
+/// Forwards a transaction's metadata to the tx_processor channel via
+/// `try_send`. The full metadata is required so the watchdog can build a
+/// same-nonce replacement later (kind, nonce, fees).
+fn send_tx(tx: &mpsc::Sender<Tx>, sent_tx: chain::SentTx, kind: TxKind) {
+	if let Err(e) = tx.try_send(Tx {
+		kind,
+		tx_hash: sent_tx.tx_hash,
+		nonce: sent_tx.nonce,
+		max_priority_fee_per_gas: sent_tx.max_priority_fee_per_gas,
+		max_fee_per_gas: sent_tx.max_fee_per_gas,
+		replacement_payload: sent_tx.request_template,
+	}) {
 		match e {
 			mpsc::error::TrySendError::Full(_) => {
 				warn!("[{kind}] tx_processor channel full — tx_hash dropped");
@@ -658,6 +687,87 @@ fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 			},
 		}
 	}
+}
+
+/// Long-lived task spawned by `run_feed_loop`. Receives `ReplaceRequest`s
+/// from the tx_processor watchdog and submits same-nonce, fee-bumped
+/// replacements for timed-out price updates. Runs for the feed loop's
+/// lifetime; exits when the channel closes.
+async fn replacement_handler(
+	mut replace_rx: mpsc::Receiver<ReplaceRequest>,
+	pyth_client: Arc<ChainClient>,
+	update_tx: mpsc::Sender<UpdateTx>,
+	resync_tx: mpsc::Sender<()>,
+	priority_multiplier: Arc<chain::PriorityFeeMultiplier>,
+) {
+	while let Some(req) = replace_rx.recv().await {
+		// Defensive: the watchdog already filters by `is_replaceable` and
+		// won't send EnableAsset/DisableAsset, but assert the invariant here
+		// too in case the watchdog logic ever drifts.
+		if !tx_processor::is_replaceable(req.kind) {
+			warn!(
+				"[Replace] Rejecting non-replaceable kind {}. This is a bug — watchdog should have filtered it.",
+				req.kind
+			);
+			continue;
+		}
+
+		for target in req.targets {
+			match pyth_client
+				.send_replacement_tx(
+					(*req.replacement_payload).clone(),
+					target.nonce,
+					target.old_max_priority_fee_per_gas,
+					target.old_max_fee_per_gas,
+				)
+				.await
+			{
+				Ok(sent_tx) => {
+					info!(
+						"[Replace] {} tx replaced at nonce {}: old={:?} new={:?} new_priority={} new_max_fee={}",
+						req.kind, target.nonce, target.old_tx_hash, sent_tx.tx_hash,
+						sent_tx.max_priority_fee_per_gas, sent_tx.max_fee_per_gas
+					);
+					send_tx(&update_tx, sent_tx, req.kind);
+				},
+				Err(e) => {
+					warn!(
+						"[Replace] {} replacement failed at nonce {}; falling back to nonce resync: {:?}",
+						req.kind, target.nonce, e
+					);
+					replacement_fallback_resync(
+						&resync_tx,
+						&priority_multiplier,
+						req.kind,
+						target.nonce,
+						"replacement submit failed",
+					);
+				},
+			}
+		}
+	}
+}
+
+fn replacement_fallback_resync(
+	resync_tx: &mpsc::Sender<()>,
+	priority_multiplier: &Arc<chain::PriorityFeeMultiplier>,
+	kind: TxKind,
+	nonce: u64,
+	reason: &str,
+) {
+	warn!(
+		"[Replace] Falling back to nonce resync after {} replacement failure at nonce {}: {}",
+		kind, nonce, reason
+	);
+	if let Err(e) = resync_tx.try_send(()) {
+		match e {
+			mpsc::error::TrySendError::Full(_) => {
+				warn!("[Replace] Resync channel full — signal dropped")
+			},
+			mpsc::error::TrySendError::Closed(_) => error!("[Replace] Resync channel closed"),
+		}
+	}
+	priority_multiplier.bump_up();
 }
 
 #[cfg(test)]
