@@ -79,7 +79,7 @@ impl DarkOracleUpdater {
 	pub async fn disable_asset(
 		&self,
 		symbol: &str,
-	) -> Result<(B256, AssetMetadata), Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<(SentTx, AssetMetadata), Box<dyn Error + Send + Sync + 'static>> {
 		info!("Disabling DarkOracle contract asset {}...", symbol);
 		let asset_addr = configs::get_asset_address(symbol)
 			.ok_or_else(|| format!("Asset address not found for symbol: {}", symbol))?;
@@ -93,12 +93,11 @@ impl DarkOracleUpdater {
 			.gas(500_000)
 			.max_priority_fee_per_gas(priority_fee); // Uses the shared estimated priority fee, including any active watchdog bump.
 
-		let tx_hash = self
+		let sent_tx = self
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
-			.await?
-			.tx_hash;
-		Ok((tx_hash, meta))
+			.await?;
+		Ok((sent_tx, meta))
 	}
 
 	pub async fn is_asset_registered(
@@ -115,7 +114,7 @@ impl DarkOracleUpdater {
 		&self,
 		symbol: &str,
 		meta: &AssetMetadata,
-	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<SentTx, Box<dyn Error + Send + Sync + 'static>> {
 		info!("Enabling DarkOracle contract asset {}...", symbol);
 
 		let priority_fee = self.client.estimate_priority_fee().await?;
@@ -131,12 +130,11 @@ impl DarkOracleUpdater {
 			.gas(500_000)
 			.max_priority_fee_per_gas(priority_fee);
 
-		let tx_hash = self
+		let sent_tx = self
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
-			.await?
-			.tx_hash;
-		Ok(tx_hash)
+			.await?;
+		Ok(sent_tx)
 	}
 
 	pub async fn update_prices(

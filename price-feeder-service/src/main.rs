@@ -94,6 +94,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let priority_multiplier = chain_client.priority_multiplier.clone();
 	let replacement_resync_tx = resync_tx.clone();
 	let replacement_priority_multiplier = priority_multiplier.clone();
+	let wallet_address = nonce_manager.address();
 
 	tokio::spawn(async move {
 		info!("Starting on-chain transaction processor with embedded watchdog");
@@ -103,6 +104,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			replace_tx,
 			nonce_tx_timeout,
 			priority_multiplier,
+			wallet_address,
 		)
 		.await;
 	});
