@@ -16,7 +16,6 @@ use crate::api::PriceApi;
 use crate::storage::{CoinInfoStorage, TimeframeStatus};
 use crate::types::{Aggregator, CoinInfo};
 use crate::AssetSpecifier;
-use alloy::primitives::B256;
 use configs::HierarchyEntry;
 use futures::stream::{FuturesUnordered, StreamExt};
 use helpers::{convert_to_coin_info, BIPS_DIVISOR};
@@ -24,8 +23,10 @@ use log::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::error::Error;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
-use tx_processor::{ConfirmOutcome, UpdateTx as Tx, UpdateTxKind as TxKind};
+use tokio::sync::{mpsc, oneshot, Notify};
+use tx_processor::{
+	ConfirmOutcome, ReplaceRequest, TxResolution, UpdateTx as Tx, UpdateTxKind as TxKind,
+};
 
 pub use configs::ProviderHierarchy;
 
@@ -68,6 +69,7 @@ async fn reconcile_asset_registration_on_startup(
 	startup_reconciled_assets: Arc<tokio::sync::Mutex<HashSet<String>>>,
 	dark_oracle_updater: &DarkOracleUpdater,
 	hierarchy: &ProviderHierarchy,
+	update_tx: &mpsc::Sender<Tx>,
 ) {
 	if !hierarchy.disable_on_exhaustion.get(asset_symbol).cloned().unwrap_or(false) {
 		return;
@@ -118,8 +120,8 @@ async fn reconcile_asset_registration_on_startup(
 	);
 
 	for attempt in 1..=STARTUP_ENABLE_MAX_RETRIES {
-		let tx_hash = match dark_oracle_updater.enable_asset(asset_symbol, &meta).await {
-			Ok(tx_hash) => tx_hash,
+		let sent_tx = match dark_oracle_updater.enable_asset(asset_symbol, &meta).await {
+			Ok(sent_tx) => sent_tx,
 			Err(e) => {
 				error!(
 					"Failed to enable {} during startup reconciliation (attempt {}/{}): {:?}",
@@ -138,8 +140,20 @@ async fn reconcile_asset_registration_on_startup(
 			},
 		};
 
-		let provider = dark_oracle_updater.provider();
-		match tx_processor::confirm_tx(provider, TxKind::EnableAsset, tx_hash).await {
+		let (res_tx, res_rx) = oneshot::channel();
+		send_tx(update_tx, sent_tx.clone(), TxKind::EnableAsset, Some(res_tx));
+
+		let outcome = match res_rx.await {
+			Ok(TxResolution::Confirmed) => ConfirmOutcome::Confirmed,
+			Ok(TxResolution::Reverted) => ConfirmOutcome::Reverted,
+			Err(_) => {
+				// Tracker unavailable (channel full/closed) — fall back to
+				// polling the original hash directly.
+				let provider = dark_oracle_updater.provider();
+				tx_processor::confirm_tx(provider, TxKind::EnableAsset, sent_tx.tx_hash).await
+			},
+		};
+		match outcome {
 			ConfirmOutcome::Confirmed => {
 				startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
 				info!("Successfully enabled {} during startup reconciliation", asset_symbol);
@@ -175,6 +189,7 @@ async fn handle_asset_recovery(
 	asset_symbol: &str,
 	disabled_assets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, AssetStatus>>>,
 	dark_oracle_updater: DarkOracleUpdater,
+	update_tx: mpsc::Sender<Tx>,
 ) {
 	let mut disabled_guard = disabled_assets.lock().await;
 	match disabled_guard.get(asset_symbol) {
@@ -194,15 +209,19 @@ async fn handle_asset_recovery(
 			let disabled_assets_clone = disabled_assets.clone();
 
 			tokio::spawn(async move {
-				if let Err(e) = updater_clone.enable_asset(&symbol_clone, &meta_clone).await {
-					error!("Failed to enable {}: {:?}", symbol_clone, e);
-				} else {
-					let mut guard = disabled_assets_clone.lock().await;
-					// Only remove if the status hasn't been flipped back to Disabled in the meantime
-					if let Some(AssetStatus::Enabling(_)) = guard.get(&symbol_clone) {
-						guard.remove(&symbol_clone);
-						info!("Successfully enabled {}", symbol_clone);
-					}
+				match updater_clone.enable_asset(&symbol_clone, &meta_clone).await {
+					Err(e) => {
+						error!("Failed to enable {}: {:?}", symbol_clone, e);
+					},
+					Ok(sent_tx) => {
+						send_tx(&update_tx, sent_tx, TxKind::EnableAsset, None);
+						let mut guard = disabled_assets_clone.lock().await;
+						// Only remove if the status hasn't been flipped back to Disabled in the meantime
+						if let Some(AssetStatus::Enabling(_)) = guard.get(&symbol_clone) {
+							guard.remove(&symbol_clone);
+							info!("Successfully enabled {}", symbol_clone);
+						}
+					},
 				}
 			});
 		},
@@ -219,6 +238,7 @@ async fn handle_asset_exhausted(
 	currencies_to_feed: &mut Vec<CoinInfo>,
 	missing_data: &mut bool,
 	hierarchy: &ProviderHierarchy,
+	update_tx: &mpsc::Sender<Tx>,
 ) {
 	let asset_symbol = asset.symbol.as_str();
 	// Look up the most recent (but stale) price across the hierarchy.
@@ -273,9 +293,14 @@ async fn handle_asset_exhausted(
 		info!("Hierarchy exhausted for {}, sending disable tx", asset_symbol);
 
 		// Block the feed loop until the disable tx is confirmed on-chain!!
+		// The wait is nonce-based: the tx is tracked by the tx_processor, so
+		// if it gets stuck the watchdog fee-bumps it (same payload) and the
+		// resolution waiter fires when the nonce lands — under whichever hash
+		// Direct hash polling remains only as a fallback when the
+		// tracker channel is unavailable.
 		let provider = dark_oracle_updater.provider();
 		let meta = loop {
-			let (tx_hash, meta) = match dark_oracle_updater.disable_asset(asset_symbol).await {
+			let (sent_tx, meta) = match dark_oracle_updater.disable_asset(asset_symbol).await {
 				Ok(ok) => ok,
 				Err(e) => {
 					error!("Failed to submit disable tx for {}: {:?}, retrying", asset_symbol, e);
@@ -284,7 +309,22 @@ async fn handle_asset_exhausted(
 				},
 			};
 
-			match tx_processor::confirm_tx(provider.clone(), TxKind::DisableAsset, tx_hash).await {
+			let (res_tx, res_rx) = oneshot::channel();
+			send_tx(update_tx, sent_tx.clone(), TxKind::DisableAsset, Some(res_tx));
+
+			let outcome = match res_rx.await {
+				Ok(TxResolution::Confirmed) => ConfirmOutcome::Confirmed,
+				Ok(TxResolution::Reverted) => ConfirmOutcome::Reverted,
+				Err(_) => {
+					warn!(
+						"Tx tracker unavailable for disable tx of {} — falling back to direct receipt polling",
+						asset_symbol
+					);
+					tx_processor::confirm_tx(provider.clone(), TxKind::DisableAsset, sent_tx.tx_hash)
+						.await
+				},
+			};
+			match outcome {
 				ConfirmOutcome::Confirmed => break meta,
 				ConfirmOutcome::Reverted => {
 					warn!("Disable tx for {} reverted on-chain, resubmitting", asset_symbol);
@@ -455,6 +495,9 @@ pub async fn run_feed_loop(
 	mut pyth_updater: PythPriceUpdater,
 	pyth_client: Arc<ChainClient>,
 	fetch_trigger: Arc<Notify>,
+	replace_rx: mpsc::Receiver<ReplaceRequest>,
+	resync_tx: mpsc::Sender<chain::ResyncKind>,
+	priority_multiplier: Arc<chain::PriorityFeeMultiplier>,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 	info!("Starting feed loop");
 
@@ -463,6 +506,24 @@ pub async fn run_feed_loop(
 	let startup_reconciled_assets = Arc::new(tokio::sync::Mutex::new(HashSet::<String>::new()));
 	let hierarchy = ProviderHierarchy::default();
 	let update_interval = dark_oracle_updater.get_update_interval();
+
+	// Spawn the replacement handler for the lifetime of the feed loop. It
+	// receives `ReplaceRequest`s from the tx_processor watchdog and
+	// re-submits the same-kind price update at the tracked nonce with
+	// bumped fees.
+	{
+		let pyth_client = pyth_client.clone();
+		let update_tx = update_tx.clone();
+		let resync_tx = resync_tx.clone();
+		let priority_multiplier = priority_multiplier.clone();
+		tokio::spawn(replacement_handler(
+			replace_rx,
+			pyth_client,
+			update_tx,
+			resync_tx,
+			priority_multiplier,
+		));
+	}
 
 	loop {
 		let feed_start = tokio::time::Instant::now();
@@ -475,9 +536,9 @@ pub async fn run_feed_loop(
 
 		let pyth_future = async {
 			match pyth_updater.run_update(pyth_client.clone(), &supported_currencies).await {
-				Ok((tx_hash_opt, price_data)) => {
-					if let Some(tx_hash) = tx_hash_opt {
-						send_tx(&update_tx, TxKind::Pyth, tx_hash);
+				Ok((sent_tx_opt, _price_data)) => {
+					if let Some(sent_tx) = sent_tx_opt {
+						send_tx(&update_tx, sent_tx, TxKind::Pyth, None);
 					}
 				},
 				Err(e) => {
@@ -529,6 +590,7 @@ pub async fn run_feed_loop(
 					startup_reconciled_assets.clone(),
 					&dark_oracle_updater,
 					&hierarchy,
+					&update_tx,
 				)
 				.await;
 
@@ -537,6 +599,7 @@ pub async fn run_feed_loop(
 					&asset.symbol,
 					disabled_assets.clone(),
 					dark_oracle_updater.clone(),
+					update_tx.clone(),
 				)
 				.await;
 
@@ -552,6 +615,7 @@ pub async fn run_feed_loop(
 					&mut currencies_to_feed,
 					&mut missing_data,
 					&hierarchy,
+					&update_tx,
 				)
 				.await;
 			}
@@ -569,8 +633,8 @@ pub async fn run_feed_loop(
 				info!("Pushing prices to DarkOracle on-chain from providers: {}", provider_summary);
 
 				match dark_oracle_updater.update_prices(&currencies_to_feed).await {
-					Ok((tx_hash, price_data)) => {
-						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
+					Ok((sent_tx, price_data)) => {
+						send_tx(&update_tx, sent_tx, TxKind::DarkOracle, None);
 
 						// Price divergence validation for EURC
 						let pyth_eurc_tf =
@@ -646,9 +710,31 @@ fn schedule_fetch_trigger(
 	});
 }
 
-/// Forwards a transaction hash to the tx_processor channel via `try_send`.
-fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
-	if let Err(e) = tx.try_send(Tx { kind, tx_hash }) {
+/// Forwards a transaction's metadata to the tx_processor channel via
+/// `try_send`. The full metadata is required so the watchdog can build a
+/// same-nonce replacement later (kind, nonce, fees, payload).
+///
+/// When `resolution_tx` is provided, the tracker fires it once the tx's
+/// *nonce* resolves on-chain (Confirmed/Reverted) — under whichever hash won,
+/// if the tx was fee-bump-replaced meanwhile. If the message is dropped here
+/// (channel full/closed), the sender is dropped with it and the caller's
+/// receiver errors immediately, which callers use to fall back to direct
+/// hash polling.
+fn send_tx(
+	tx: &mpsc::Sender<Tx>,
+	sent_tx: chain::SentTx,
+	kind: TxKind,
+	resolution_tx: Option<oneshot::Sender<TxResolution>>,
+) {
+	if let Err(e) = tx.try_send(Tx {
+		kind,
+		tx_hash: sent_tx.tx_hash,
+		nonce: sent_tx.nonce,
+		max_priority_fee_per_gas: sent_tx.max_priority_fee_per_gas,
+		max_fee_per_gas: sent_tx.max_fee_per_gas,
+		replacement_payload: sent_tx.request_template,
+		resolution_tx,
+	}) {
 		match e {
 			mpsc::error::TrySendError::Full(_) => {
 				warn!("[{kind}] tx_processor channel full — tx_hash dropped");
@@ -658,6 +744,116 @@ fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 			},
 		}
 	}
+}
+
+/// Long-lived task spawned by `run_feed_loop`. Receives `ReplaceRequest`s
+/// from the tx_processor watchdog and submits same-nonce, fee-bumped
+/// replacements for timed-out txs (price updates with the newest same-kind
+/// payload; Enable/Disable with their own payload). Runs for the feed loop's
+/// lifetime; exits when the channel closes.
+async fn replacement_handler(
+	mut replace_rx: mpsc::Receiver<ReplaceRequest>,
+	pyth_client: Arc<ChainClient>,
+	update_tx: mpsc::Sender<UpdateTx>,
+	resync_tx: mpsc::Sender<chain::ResyncKind>,
+	priority_multiplier: Arc<chain::PriorityFeeMultiplier>,
+) {
+	while let Some(req) = replace_rx.recv().await {
+		for target in req.targets {
+			match pyth_client
+				.send_replacement_tx(
+					(*target.payload).clone(),
+					target.nonce,
+					target.old_max_priority_fee_per_gas,
+					target.old_max_fee_per_gas,
+				)
+				.await
+			{
+				Ok(sent_tx) => {
+					info!(
+						"[Replace] {} tx replaced at nonce {}: old={:?} new={:?} new_priority={} new_max_fee={}",
+						req.kind, target.nonce, target.old_tx_hash, sent_tx.tx_hash,
+						sent_tx.max_priority_fee_per_gas, sent_tx.max_fee_per_gas
+					);
+					send_tx(&update_tx, sent_tx, req.kind, None);
+				},
+				Err(e) => {
+					let msg = e.to_string();
+					if msg.contains("nonce too low") {
+						// The original tx was mined in the window between the
+						// watchdog timing it out and this replacement reaching
+						// the node. The data is on-chain — that is success, not
+						// failure. No resync, no fee bump; the confirm poller /
+						// watchdog probe will resolve the nonce shortly.
+						info!(
+							"[Replace] {} at nonce {} was already mined before the replacement landed — treating as success",
+							req.kind, target.nonce
+						);
+					} else if msg.contains(chain::REPLACEMENT_CEILING_MARKER) {
+						// Bumping further would exceed MAX_PRIORITY_FEE_WEI.
+						// Withhold and alert; the watchdog re-arms and retries
+						// once the network estimate allows a valid bump again.
+						let alert = format!(
+							"[Replace] {} replacement at nonce {} withheld: {}",
+							req.kind, target.nonce, msg
+						);
+						error!("{}", alert);
+						alerts::send_slack_alert(alert).await;
+					} else if msg.contains("underpriced") || msg.contains("already known") {
+						// Something with equal-or-higher fees already occupies
+						// the slot — most likely our own prior replacement whose
+						// tracking message was dropped. Step the ladder up so the
+						// watchdog's next attempt (it re-arms automatically)
+						// computes higher fees, and let the on-chain nonce probe
+						// resolve the entry if that tx mines.
+						warn!(
+							"[Replace] {} replacement at nonce {} rejected as underpriced/known; bumping fee ladder and letting the watchdog re-arm",
+							req.kind, target.nonce
+						);
+						priority_multiplier.bump_up();
+					} else {
+						warn!(
+							"[Replace] {} replacement failed at nonce {}; falling back to nonce resync: {:?}",
+							req.kind, target.nonce, e
+						);
+						replacement_fallback_resync(
+							&resync_tx,
+							&priority_multiplier,
+							req.kind,
+							target.nonce,
+							"replacement submit failed",
+						);
+					}
+				},
+			}
+		}
+	}
+}
+
+fn replacement_fallback_resync(
+	resync_tx: &mpsc::Sender<chain::ResyncKind>,
+	priority_multiplier: &Arc<chain::PriorityFeeMultiplier>,
+	kind: TxKind,
+	nonce: u64,
+	reason: &str,
+) {
+	warn!(
+		"[Replace] Falling back to nonce resync after {} replacement failure at nonce {}: {}",
+		kind, nonce, reason
+	);
+	// Advance-only re-anchor: an unexpected replacement error is not evidence
+	// of an untracked blocker below our queue, so do not rewind the counter
+	// into live nonces. A genuine gap is still caught by the watchdog's own
+	// on-chain probe, which issues a `Rewind`.
+	if let Err(e) = resync_tx.try_send(chain::ResyncKind::Reanchor) {
+		match e {
+			mpsc::error::TrySendError::Full(_) => {
+				warn!("[Replace] Resync channel full — signal dropped")
+			},
+			mpsc::error::TrySendError::Closed(_) => error!("[Replace] Resync channel closed"),
+		}
+	}
+	priority_multiplier.bump_up();
 }
 
 #[cfg(test)]

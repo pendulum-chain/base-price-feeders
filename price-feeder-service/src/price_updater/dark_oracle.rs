@@ -8,7 +8,7 @@ use std::convert::TryFrom;
 use std::error::Error;
 use std::sync::Arc;
 
-use super::chain::{ChainClient, ChainProvider, HttpTransport, PriceData};
+use super::chain::{ChainClient, ChainProvider, HttpTransport, PriceData, SentTx};
 use super::configs;
 use crate::types::CoinInfo;
 
@@ -79,7 +79,7 @@ impl DarkOracleUpdater {
 	pub async fn disable_asset(
 		&self,
 		symbol: &str,
-	) -> Result<(B256, AssetMetadata), Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<(SentTx, AssetMetadata), Box<dyn Error + Send + Sync + 'static>> {
 		info!("Disabling DarkOracle contract asset {}...", symbol);
 		let asset_addr = configs::get_asset_address(symbol)
 			.ok_or_else(|| format!("Asset address not found for symbol: {}", symbol))?;
@@ -93,11 +93,11 @@ impl DarkOracleUpdater {
 			.gas(500_000)
 			.max_priority_fee_per_gas(priority_fee); // Uses the shared estimated priority fee, including any active watchdog bump.
 
-		let tx_hash = self
+		let sent_tx = self
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
 			.await?;
-		Ok((tx_hash, meta))
+		Ok((sent_tx, meta))
 	}
 
 	pub async fn is_asset_registered(
@@ -114,7 +114,7 @@ impl DarkOracleUpdater {
 		&self,
 		symbol: &str,
 		meta: &AssetMetadata,
-	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<SentTx, Box<dyn Error + Send + Sync + 'static>> {
 		info!("Enabling DarkOracle contract asset {}...", symbol);
 
 		let priority_fee = self.client.estimate_priority_fee().await?;
@@ -130,17 +130,17 @@ impl DarkOracleUpdater {
 			.gas(500_000)
 			.max_priority_fee_per_gas(priority_fee);
 
-		let tx_hash = self
+		let sent_tx = self
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
 			.await?;
-		Ok(tx_hash)
+		Ok(sent_tx)
 	}
 
 	pub async fn update_prices(
 		&self,
 		currencies: &Vec<CoinInfo>,
-	) -> Result<(B256, PriceData), Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<(SentTx, PriceData), Box<dyn Error + Send + Sync + 'static>> {
 		info!("Starting DarkOracle contract price update...");
 
 		let symbol_to_price: HashMap<&str, u128> =
@@ -189,7 +189,7 @@ impl DarkOracleUpdater {
 			.gas(1_000_000)
 			.max_priority_fee_per_gas(priority_fee);
 
-		let tx_hash = self
+		let sent_tx = self
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
 			.await?;
@@ -201,6 +201,6 @@ impl DarkOracleUpdater {
 
 		let price_data = PriceData { prices: prices_map };
 
-		Ok((tx_hash, price_data))
+		Ok((sent_tx, price_data))
 	}
 }
