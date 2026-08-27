@@ -62,6 +62,21 @@ pub struct DiaApiArgs {
 
 	#[clap(flatten)]
 	pub fastforex: FastForexConfig,
+
+	#[clap(flatten)]
+	pub pyth: PythConfig,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct PythConfig {
+	/// API key for the Pyth Hermes API, sent as `Authorization: Bearer <key>`.
+	/// Required since Pyth's Core cutover (2026-08-26); without it Hermes responds 401.
+	#[clap(long, env = "PYTH_API_KEY", hide_env_values = true)]
+	pub pyth_api_key: Option<String>,
+
+	/// Base URL of the Pyth Hermes API
+	#[clap(long, env = "HERMES_URL", default_value = "https://pyth.dourolabs.app/hermes")]
+	pub hermes_url: String,
 }
 
 #[derive(Parser, Debug, Clone)]

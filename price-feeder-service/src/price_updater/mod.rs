@@ -9,7 +9,7 @@ pub mod tx_processor;
 pub use alerts::PriceDivergenceAlert;
 pub use chain::ChainClient;
 pub use dark_oracle::DarkOracleUpdater;
-pub use pyth::PythPriceUpdater;
+pub use pyth::{HermesClient, PythPriceUpdater};
 pub use tx_processor::UpdateTx;
 
 use crate::api::PriceApi;
@@ -332,12 +332,13 @@ pub async fn run_fetch_loop<T>(
 	update_interval: std::time::Duration,
 	fetch_trigger: Arc<Notify>,
 	api: T,
+	hermes: HermesClient,
 	_update_tx: mpsc::Sender<UpdateTx>,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>>
 where
 	T: PriceApi + Send + Sync + 'static,
 {
-	let _ = run_single_fetch(&storage, &supported_currencies, update_interval, &api).await;
+	let _ = run_single_fetch(&storage, &supported_currencies, update_interval, &api, &hermes).await;
 
 	loop {
 		fetch_trigger.notified().await;
@@ -346,7 +347,8 @@ where
 		// waiting for the next trigger.
 		loop {
 			let had_error =
-				run_single_fetch(&storage, &supported_currencies, update_interval, &api).await;
+				run_single_fetch(&storage, &supported_currencies, update_interval, &api, &hermes)
+					.await;
 			if !had_error {
 				break;
 			}
@@ -362,6 +364,7 @@ async fn run_single_fetch<T>(
 	supported_currencies: &HashSet<AssetSpecifier>,
 	update_interval: std::time::Duration,
 	api: &T,
+	hermes: &HermesClient,
 ) -> bool
 where
 	T: PriceApi + Send + Sync + 'static,
@@ -398,7 +401,7 @@ where
 
 	// Fetch Pyth prices. Purely for storage update as coinbase/coingecko final backups.
 	let pyth_future = async {
-		match pyth::fetch_pyth_prices(supported_currencies).await {
+		match hermes.fetch_pyth_prices(supported_currencies).await {
 			Ok((_data, price_data)) => {
 				let time = chrono::Utc::now().timestamp_millis() as u64;
 

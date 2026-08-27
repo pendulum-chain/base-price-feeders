@@ -13,8 +13,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 
 use crate::price_updater::{
-	alerts, chain::ChainClient, tx_processor, DarkOracleUpdater, PriceDivergenceAlert,
-	ProviderHierarchy, PythPriceUpdater, UpdateTx,
+	alerts, chain::ChainClient, tx_processor, DarkOracleUpdater, HermesClient,
+	PriceDivergenceAlert, ProviderHierarchy, PythPriceUpdater, UpdateTx,
 };
 
 mod api;
@@ -75,8 +75,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		alerts::run_divergence_alert_processor(divergence_rx).await;
 	});
 
-	let pyth_updater =
-		PythPriceUpdater::new(std::time::Duration::from_secs(pyth_update_interval_seconds))?;
+	let hermes_client = HermesClient::new(&args.pyth);
+	let pyth_updater = PythPriceUpdater::new(
+		hermes_client.clone(),
+		std::time::Duration::from_secs(pyth_update_interval_seconds),
+	)?;
 	let nonce_manager = ChainClient::create_nonce_manager().await?;
 	let chain_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
 	let dark_oracle_client = chain_client.clone();
@@ -112,6 +115,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			update_interval,
 			fetch_trigger_clone,
 			price_api,
+			hermes_client,
 			fetch_update_tx,
 		)
 		.await;
