@@ -8,7 +8,8 @@ use log::{debug, error, info, warn};
 use reqwest::{header, StatusCode};
 use serde::Deserialize;
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::types::AssetSpecifier;
 use std::collections::{HashMap, HashSet};
@@ -60,12 +61,26 @@ sol! {
 
 // ── Hermes client ─────────────────────────────────────────────────────────────
 
+// How long to suppress Hermes requests after an authentication failure. While the API key is
+// missing or invalid every request is doomed, so retrying faster than this only produces a
+// request/log storm.
+const AUTH_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
+
 #[derive(Debug)]
 pub enum PythFetchError {
 	/// Hermes rejected our credentials (HTTP 401/403). Retrying cannot succeed until the API key
 	/// is fixed.
 	Unauthorized(StatusCode),
+	/// A recent authentication failure put the client into backoff; the request was skipped
+	/// without contacting Hermes.
+	AuthBackoff,
 	Other(String),
+}
+
+impl PythFetchError {
+	pub fn is_auth(&self) -> bool {
+		matches!(self, Self::Unauthorized(_) | Self::AuthBackoff)
+	}
 }
 
 impl std::fmt::Display for PythFetchError {
@@ -74,6 +89,11 @@ impl std::fmt::Display for PythFetchError {
 			Self::Unauthorized(status) => {
 				write!(f, "Hermes API rejected credentials ({}) — check PYTH_API_KEY", status)
 			},
+			Self::AuthBackoff => write!(
+				f,
+				"Hermes requests suspended for {:?} after an authentication failure",
+				AUTH_FAILURE_BACKOFF
+			),
 			Self::Other(msg) => write!(f, "{}", msg),
 		}
 	}
@@ -97,6 +117,8 @@ impl From<String> for PythFetchError {
 pub struct HermesClient {
 	client: reqwest::Client,
 	base_url: String,
+	// Shared across clones so the fetch and feed loops back off together.
+	auth_backoff_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl HermesClient {
@@ -121,7 +143,18 @@ impl HermesClient {
 			.build()
 			.expect("failed to build Hermes HTTP client");
 
-		Self { client, base_url: config.hermes_url.trim_end_matches('/').to_string() }
+		Self {
+			client,
+			base_url: config.hermes_url.trim_end_matches('/').to_string(),
+			auth_backoff_until: Arc::new(Mutex::new(None)),
+		}
+	}
+
+	fn in_auth_backoff(&self) -> bool {
+		self.auth_backoff_until
+			.lock()
+			.unwrap()
+			.is_some_and(|until| Instant::now() < until)
 	}
 
 	pub async fn fetch_pyth_prices(
@@ -147,6 +180,10 @@ impl HermesClient {
 			));
 		}
 
+		if self.in_auth_backoff() {
+			return Err(PythFetchError::AuthBackoff);
+		}
+
 		// Remove trailing '&'
 		query_params.pop();
 
@@ -156,12 +193,17 @@ impl HermesClient {
 		let response = self.client.get(&api_url).send().await?;
 		let status = response.status();
 		if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-			error!("Hermes API returned {} — check PYTH_API_KEY", status);
+			*self.auth_backoff_until.lock().unwrap() = Some(Instant::now() + AUTH_FAILURE_BACKOFF);
+			error!(
+				"Hermes API returned {} — check PYTH_API_KEY; suppressing Pyth requests for {:?}",
+				status, AUTH_FAILURE_BACKOFF
+			);
 			return Err(PythFetchError::Unauthorized(status));
 		}
 		if !status.is_success() {
 			return Err(format!("Hermes API request failed: {}", status).into());
 		}
+		*self.auth_backoff_until.lock().unwrap() = None;
 
 		let data: HermesResponse = response.json().await?;
 
@@ -366,11 +408,37 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn unauthorized_response_returns_typed_error() {
-		let (url, _handle) = spawn_mock_hermes("HTTP/1.1 401 Unauthorized", "{}", 1).await;
+	async fn unauthorized_response_enters_backoff() {
+		let (url, handle) = spawn_mock_hermes("HTTP/1.1 401 Unauthorized", "{}", 1).await;
 		let client = HermesClient::new(&config(&url, Some("bad-key")));
 
-		let err = client.fetch_pyth_prices(&eurc_currencies()).await.unwrap_err();
-		assert!(matches!(err, PythFetchError::Unauthorized(_)), "got {:?}", err);
+		let first = client.fetch_pyth_prices(&eurc_currencies()).await.unwrap_err();
+		assert!(matches!(first, PythFetchError::Unauthorized(_)), "got {:?}", first);
+		assert!(first.is_auth());
+
+		// The mock server is gone after one response; if the calls below issued a request they
+		// would fail with a connection error (`Other`), not `AuthBackoff`.
+		handle.await.unwrap();
+		let second = client.fetch_pyth_prices(&eurc_currencies()).await.unwrap_err();
+		assert!(matches!(second, PythFetchError::AuthBackoff), "got {:?}", second);
+		assert!(second.is_auth());
+
+		// Clones share the backoff state (the fetch and feed loops hold separate clones).
+		let clone_err = client.clone().fetch_pyth_prices(&eurc_currencies()).await.unwrap_err();
+		assert!(matches!(clone_err, PythFetchError::AuthBackoff), "got {:?}", clone_err);
+	}
+
+	#[tokio::test]
+	async fn non_auth_http_error_does_not_enter_backoff() {
+		let (url, _handle) = spawn_mock_hermes("HTTP/1.1 500 Internal Server Error", "{}", 2).await;
+		let client = HermesClient::new(&config(&url, Some("test-key")));
+
+		let first = client.fetch_pyth_prices(&eurc_currencies()).await.unwrap_err();
+		assert!(matches!(first, PythFetchError::Other(_)), "got {:?}", first);
+		assert!(!first.is_auth());
+
+		// No backoff: the second call must reach the server again (it serves two responses).
+		let second = client.fetch_pyth_prices(&eurc_currencies()).await.unwrap_err();
+		assert!(matches!(second, PythFetchError::Other(_)), "got {:?}", second);
 	}
 }

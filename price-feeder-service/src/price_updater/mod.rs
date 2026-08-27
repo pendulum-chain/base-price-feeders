@@ -423,6 +423,12 @@ where
 				}
 				false
 			},
+			// Auth failures are not retryable until the API key is fixed; reporting them as
+			// errors here would make the fetch loop hammer Hermes with doomed requests.
+			Err(e) if e.is_auth() => {
+				debug!("Skipping Pyth prices in fetch loop: {}", e);
+				false
+			},
 			Err(e) => {
 				error!("Failed to fetch Pyth prices in fetch loop: {:?}", e);
 				true
@@ -484,7 +490,16 @@ pub async fn run_feed_loop(
 					}
 				},
 				Err(e) => {
-					error!("Failed to fetch/submit Pyth prices: {:?}", e);
+					let is_auth = e
+						.downcast_ref::<pyth::PythFetchError>()
+						.is_some_and(|pyth_err| pyth_err.is_auth());
+					if is_auth {
+						// The 401 itself is logged where it happens; per-tick repeats
+						// during the backoff window would only flood the logs.
+						debug!("Skipping Pyth on-chain update: {}", e);
+					} else {
+						error!("Failed to fetch/submit Pyth prices: {:?}", e);
+					}
 				},
 			}
 		};
@@ -666,10 +681,68 @@ fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::{
+		api::QuotationsFuture, args::PythConfig,
+		price_updater::pyth::test_support::spawn_mock_hermes,
+	};
 
 	#[test]
 	fn startup_recovery_only_registers_when_asset_is_unregistered() {
 		assert!(should_recover_asset_on_startup(false));
 		assert!(!should_recover_asset_on_startup(true));
+	}
+
+	struct NoopPriceApi;
+
+	impl PriceApi for NoopPriceApi {
+		fn get_quotation_futures<'a>(
+			&'a self,
+			_assets: Vec<&'a AssetSpecifier>,
+		) -> Vec<QuotationsFuture<'a>> {
+			vec![]
+		}
+	}
+
+	fn eurc_currencies() -> HashSet<AssetSpecifier> {
+		vec![AssetSpecifier { blockchain: "Base".into(), symbol: "EURC".into() }]
+			.into_iter()
+			.collect()
+	}
+
+	fn hermes_client(url: String) -> HermesClient {
+		HermesClient::new(&PythConfig { pyth_api_key: None, hermes_url: url })
+	}
+
+	// Regression test for the Hermes 401 request storm: an auth failure must not be reported as
+	// a retryable provider error, otherwise `run_fetch_loop` hot-retries it until the next
+	// trigger.
+	#[tokio::test]
+	async fn fetch_loop_does_not_hot_retry_hermes_auth_failures() {
+		let (url, _handle) = spawn_mock_hermes("HTTP/1.1 401 Unauthorized", "{}", 1).await;
+		let hermes = hermes_client(url);
+		let interval = std::time::Duration::from_secs(1);
+		let storage = Arc::new(CoinInfoStorage::new(interval));
+		let currencies = eurc_currencies();
+
+		let had_error =
+			run_single_fetch(&storage, &currencies, interval, &NoopPriceApi, &hermes).await;
+		assert!(!had_error, "a 401 from Hermes must not trigger an immediate retry");
+
+		// While the auth backoff is active the fetch loop must stay quiet as well.
+		let had_error =
+			run_single_fetch(&storage, &currencies, interval, &NoopPriceApi, &hermes).await;
+		assert!(!had_error, "auth backoff must not trigger an immediate retry");
+	}
+
+	#[tokio::test]
+	async fn fetch_loop_still_retries_non_auth_hermes_errors() {
+		let (url, _handle) = spawn_mock_hermes("HTTP/1.1 500 Internal Server Error", "{}", 1).await;
+		let hermes = hermes_client(url);
+		let interval = std::time::Duration::from_secs(1);
+		let storage = Arc::new(CoinInfoStorage::new(interval));
+
+		let had_error =
+			run_single_fetch(&storage, &eurc_currencies(), interval, &NoopPriceApi, &hermes).await;
+		assert!(had_error, "a transient Hermes error must still be retryable");
 	}
 }
