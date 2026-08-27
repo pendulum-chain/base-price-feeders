@@ -441,4 +441,49 @@ mod tests {
 		let second = client.fetch_pyth_prices(&eurc_currencies()).await.unwrap_err();
 		assert!(matches!(second, PythFetchError::Other(_)), "got {:?}", second);
 	}
+
+	// Live credential check against the real Hermes API. Ignored by default; run manually with
+	// PYTH_API_KEY (and optionally HERMES_URL / SUPPORTED_CURRENCIES) in the environment or .env:
+	//   cargo test live_hermes_fetch -- --ignored --nocapture
+	#[tokio::test]
+	#[ignore]
+	async fn live_hermes_fetch() {
+		dotenv::dotenv().ok();
+		let pyth_config = PythConfig {
+			pyth_api_key: std::env::var("PYTH_API_KEY").ok(),
+			hermes_url: std::env::var("HERMES_URL")
+				.unwrap_or_else(|_| "https://pyth.dourolabs.app/hermes".to_string()),
+		};
+		assert!(
+			pyth_config.pyth_api_key.as_deref().is_some_and(|key| !key.trim().is_empty()),
+			"PYTH_API_KEY is not set; put it in price-feeder-service/.env"
+		);
+		let client = HermesClient::new(&pyth_config);
+
+		// Mirrors the service's SUPPORTED_CURRENCIES default.
+		let supported = std::env::var("SUPPORTED_CURRENCIES")
+			.unwrap_or_else(|_| "Base:EURC,Base:USDC,Base:BRL".to_string());
+		let currencies: HashSet<AssetSpecifier> = supported
+			.split(',')
+			.filter_map(|asset| {
+				let (blockchain, symbol) = asset.trim().split_once(':')?;
+				Some(AssetSpecifier { blockchain: blockchain.into(), symbol: symbol.into() })
+			})
+			.collect();
+		let expected_feeds = currencies
+			.iter()
+			.filter_map(|asset| get_pyth_id(&asset.symbol))
+			.collect::<HashSet<_>>()
+			.len();
+
+		let (data, price_data) =
+			client.fetch_pyth_prices(&currencies).await.expect("live Hermes fetch failed");
+
+		assert_eq!(price_data.prices.len(), expected_feeds, "missing prices for some feeds");
+		assert!(!data.binary.data.is_empty(), "expected on-chain update data");
+		for (symbol, price) in &price_data.prices {
+			assert!(*price > 0.0, "non-positive price for {}", symbol);
+			println!("[live] {} = {}", symbol, price);
+		}
+	}
 }
