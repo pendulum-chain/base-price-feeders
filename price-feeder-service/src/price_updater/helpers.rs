@@ -4,8 +4,6 @@ use rust_decimal::Decimal;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-pub const BIPS_DIVISOR: u64 = 10000;
-
 #[derive(Debug)]
 pub enum ConvertingError {
 	DecimalTooLarge,

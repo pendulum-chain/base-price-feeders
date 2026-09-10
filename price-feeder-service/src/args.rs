@@ -19,11 +19,11 @@ pub struct DiaApiArgs {
 	#[clap(short, long, env = "UPDATE_INTERVAL_SECONDS", default_value = "1")]
 	pub update_interval_seconds: u64,
 
-	/// How often (in seconds) to update Pyth price feeds on-chain
+	/// Retained for the disabled Pyth integration; currently ignored by the runtime.
 	#[clap(long, env = "PYTH_UPDATE_INTERVAL_SECONDS", default_value = "5")]
 	pub pyth_update_interval_seconds: u64,
 
-	/// Maximum allowed price divergence in basis points (default 50 bps)
+	/// Retained for the disabled Pyth divergence alert; currently ignored by the runtime.
 	#[clap(long, env = "PRICE_DIVERGENCE_THRESHOLD_BP", default_value = "50")]
 	pub price_divergence_threshold_bp: u64,
 
@@ -63,6 +63,7 @@ pub struct DiaApiArgs {
 	#[clap(flatten)]
 	pub fastforex: FastForexConfig,
 
+	/// Retained for the disabled Pyth integration; currently ignored by the runtime.
 	#[clap(flatten)]
 	pub pyth: PythConfig,
 }
