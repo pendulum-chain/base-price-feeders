@@ -172,10 +172,13 @@ export async function checkOraclePrices() {
 
 export async function runAllChecks() {
   console.log(`\n--- Running Monitor Checks at ${new Date().toISOString()} ---`);
-  await Promise.allSettled([
+  const checks = [
     checkAccountBalance(),
-    checkStaleness(),
-    checkOraclePrices()
-  ]);
+    checkStaleness()
+  ];
+  if (config.MONITOR_PYTH) {
+    checks.push(checkOraclePrices());
+  }
+  await Promise.allSettled(checks);
   console.log(`--- Finished Checks ---\n`);
 }

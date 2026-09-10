@@ -12,6 +12,7 @@ export const config = {
   FEEDER_ACCOUNT_ADDRESS: (process.env.FEEDER_ACCOUNT_ADDRESS || "0x707e17f496a4a0cc6e0eda73480809b2385a7213") as `0x${string}`,
   SLACK_TOKEN: process.env.SLACK_TOKEN,
   SLACK_CHANNEL_ID: process.env.SLACK_CHANNEL_ID,
+  MONITOR_PYTH: (process.env.MONITOR_PYTH || "false").toLowerCase() === "true",
 
   // Monitoring thresholds
   MIN_ETH_BALANCE_THRESHOLD: Object.is(parseFloat(process.env.MIN_ETH_BALANCE_THRESHOLD || ""), NaN)
@@ -31,4 +32,6 @@ export const config = {
 // Validate required configurations
 if (!config.ALCHEMY_RPC_URL) throw new Error("Missing ALCHEMY_RPC_URL");
 if (!config.DARK_ORACLE_ADDRESS) throw new Error("Missing DARK_ORACLE_ADDRESS");
-if (!config.PYTH_ADAPTER_ADDRESS) throw new Error("Missing PYTH_ADAPTER_ADDRESS");
+if (config.MONITOR_PYTH && !config.PYTH_ADAPTER_ADDRESS) {
+  throw new Error("Missing PYTH_ADAPTER_ADDRESS while MONITOR_PYTH is enabled");
+}

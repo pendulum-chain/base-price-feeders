@@ -16,7 +16,7 @@ pub use tx_processor::UpdateTx;
 
 use crate::api::PriceApi;
 use crate::storage::{CoinInfoStorage, TimeframeStatus};
-use crate::types::{Aggregator, CoinInfo};
+use crate::types::CoinInfo;
 use crate::AssetSpecifier;
 use alloy::primitives::B256;
 use configs::HierarchyEntry;
@@ -567,6 +567,7 @@ fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 mod tests {
 	use super::*;
 	use crate::api::{AssetsByProvider, QuotationsFuture, QuotationsOutcome};
+	use crate::types::Aggregator;
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	#[test]
