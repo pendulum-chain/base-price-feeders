@@ -69,6 +69,30 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn test_currencies_post_returns_binance_brl() {
+		let storage = Arc::new(CoinInfoStorage::default());
+		storage.update_timeframe(CoinInfo {
+			symbol: "BRL".into(),
+			blockchain: "Base".into(),
+			provider: crate::types::Aggregator::Binance,
+			last_update_timestamp: chrono::Utc::now().timestamp_millis() as u64,
+			..Default::default()
+		});
+		let data = web::Data::from(storage);
+		let mut app = test::init_service(App::new().app_data(data).service(currencies_post)).await;
+		let req = test::TestRequest::post()
+			.uri("http://localhost:8080/currencies")
+			.set_json(vec![AssetSpecifier { blockchain: "Base".into(), symbol: "BRL".into() }])
+			.to_request();
+
+		let resp = test::call_service(&mut app, req).await;
+		let result: Vec<CoinInfo> = test::read_body_json(resp).await;
+
+		assert_eq!(result.len(), 1);
+		assert_eq!(result[0].provider, crate::types::Aggregator::Binance);
+	}
+
+	#[tokio::test]
 	async fn test_currencies_post_empty() {
 		let storage = get_storage();
 		let data = web::Data::from(storage.clone());

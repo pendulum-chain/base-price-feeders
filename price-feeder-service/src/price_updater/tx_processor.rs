@@ -20,6 +20,7 @@ const RESYNC_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 #[derive(Debug, Clone, Copy)]
 pub enum UpdateTxKind {
 	DarkOracle,
+	#[allow(dead_code)]
 	Pyth,
 	DisableAsset,
 	EnableAsset,

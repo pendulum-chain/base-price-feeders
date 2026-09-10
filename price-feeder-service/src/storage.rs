@@ -64,6 +64,10 @@ impl CoinInfoStorage {
 					self.get_timeframe(&spec.symbol, &spec.blockchain, Aggregator::Coingecko);
 			}
 			if selected_tf.is_none() {
+				selected_tf =
+					self.get_timeframe(&spec.symbol, &spec.blockchain, Aggregator::Binance);
+			}
+			if selected_tf.is_none() {
 				selected_tf = self.get_timeframe(&spec.symbol, "unknown", Aggregator::Pyth);
 			}
 			if let Some(mut tf) = selected_tf {

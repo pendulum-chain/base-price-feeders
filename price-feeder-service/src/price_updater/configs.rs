@@ -1,9 +1,9 @@
-use crate::types::Aggregator;
+use crate::types::{Aggregator, AssetSpecifier};
 use alloy::primitives::Address;
 use alloy::primitives::B256;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike, Utc, Weekday};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
@@ -158,12 +158,31 @@ impl ProviderHierarchy {
 			.filter(|entry| entry.window.as_ref().map_or(true, |w| w.contains(now)))
 			.collect()
 	}
+
+	/// Groups assets by every provider that is currently eligible in their
+	/// hierarchy. Providers outside their configured time window are omitted.
+	pub fn get_assets_by_provider<'a>(
+		&self,
+		assets: &'a HashSet<AssetSpecifier>,
+		now: DateTime<Utc>,
+	) -> HashMap<Aggregator, Vec<&'a AssetSpecifier>> {
+		let mut assets_by_provider = HashMap::new();
+		for asset in assets {
+			for entry in self.get_hierarchy(&asset.symbol, now) {
+				assets_by_provider
+					.entry(entry.aggregator.clone())
+					.or_insert_with(Vec::new)
+					.push(asset);
+			}
+		}
+		assets_by_provider
+	}
 }
 
 // Default hierarchy:
 //   BRL/BRLA  → Binance (always)
 //   EURC      → FastForex during Forex market hours / Coinbase outside  (time‑based)
-//   default   → Coinbase > Coingecko > Pyth
+//   default   → Coinbase > Coingecko
 impl Default for ProviderHierarchy {
 	fn default() -> Self {
 		let mut per_asset = HashMap::new();
@@ -173,7 +192,7 @@ impl Default for ProviderHierarchy {
 		per_asset.insert(
 			"EURC".to_string(),
 			vec![
-				// FastForex during Forex market hours (Sun 22:00 → Fri 22:00 UTC)
+				// FastForex during Forex market hours (Sun 22:00 → Fri 21:00 UTC)
 				HierarchyEntry::with_window(
 					Aggregator::FastForex,
 					TimeWindow {
@@ -188,7 +207,6 @@ impl Default for ProviderHierarchy {
 				),
 				HierarchyEntry::new(Aggregator::Coinbase),
 				HierarchyEntry::new(Aggregator::Coingecko),
-				HierarchyEntry::new(Aggregator::Pyth),
 			],
 		);
 
@@ -200,7 +218,6 @@ impl Default for ProviderHierarchy {
 			default: vec![
 				HierarchyEntry::new(Aggregator::Coinbase),
 				HierarchyEntry::new(Aggregator::Coingecko),
-				HierarchyEntry::new(Aggregator::Pyth),
 			],
 			per_asset,
 			disable_on_exhaustion,
@@ -268,6 +285,38 @@ fn parse_registration_metadata_config(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use chrono::TimeZone;
+
+	fn asset(blockchain: &str, symbol: &str) -> AssetSpecifier {
+		AssetSpecifier { blockchain: blockchain.into(), symbol: symbol.into() }
+	}
+
+	#[test]
+	fn active_hierarchy_groups_only_required_providers() {
+		let hierarchy = ProviderHierarchy::default();
+		let assets =
+			HashSet::from([asset("Base", "BRLA"), asset("Base", "EURC"), asset("Base", "USDC")]);
+		let market_open = Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap();
+		let grouped = hierarchy.get_assets_by_provider(&assets, market_open);
+
+		assert_eq!(grouped[&Aggregator::Binance].len(), 1);
+		assert_eq!(grouped[&Aggregator::FastForex].len(), 1);
+		assert_eq!(grouped[&Aggregator::Coinbase].len(), 2);
+		assert_eq!(grouped[&Aggregator::Coingecko].len(), 2);
+		assert!(!grouped.contains_key(&Aggregator::Pyth));
+	}
+
+	#[test]
+	fn fastforex_is_not_required_outside_its_market_window() {
+		let hierarchy = ProviderHierarchy::default();
+		let assets = HashSet::from([asset("Base", "EURC")]);
+		let market_closed = Utc.with_ymd_and_hms(2026, 9, 12, 12, 0, 0).unwrap();
+		let grouped = hierarchy.get_assets_by_provider(&assets, market_closed);
+
+		assert!(!grouped.contains_key(&Aggregator::FastForex));
+		assert!(grouped.contains_key(&Aggregator::Coinbase));
+		assert!(grouped.contains_key(&Aggregator::Coingecko));
+	}
 
 	#[test]
 	fn configured_registration_metadata_parses_brl_metadata_from_explicit_config() {
