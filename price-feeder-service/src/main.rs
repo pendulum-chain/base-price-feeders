@@ -13,8 +13,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 
 use crate::price_updater::{
-	alerts, chain::ChainClient, tx_processor, DarkOracleUpdater, HermesClient,
-	PriceDivergenceAlert, ProviderHierarchy, PythPriceUpdater, UpdateTx,
+	tx_processor, ChainClient, DarkOracleUpdater, ProviderHierarchy, UpdateTx,
 };
 
 mod api;
@@ -63,27 +62,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	let hierarchy = ProviderHierarchy::default();
 	hierarchy.validate()?;
 
-	let pyth_update_interval_seconds = args.pyth_update_interval_seconds;
-	let price_divergence_threshold_bp = args.price_divergence_threshold_bp;
-
 	let nonce_tx_timeout = std::time::Duration::from_secs(args.nonce_tx_timeout_secs);
 
-	let (divergence_tx, divergence_rx) = mpsc::channel::<PriceDivergenceAlert>(100);
-
-	tokio::spawn(async move {
-		info!("Starting price divergence alert processor");
-		alerts::run_divergence_alert_processor(divergence_rx).await;
-	});
-
-	let hermes_client = HermesClient::new(&args.pyth);
-	let pyth_updater = PythPriceUpdater::new(
-		hermes_client.clone(),
-		std::time::Duration::from_secs(pyth_update_interval_seconds),
-	)?;
 	let nonce_manager = ChainClient::create_nonce_manager().await?;
 	let chain_client = Arc::new(ChainClient::new(nonce_manager.clone()).await?);
 	let dark_oracle_client = chain_client.clone();
-	let pyth_client = chain_client.clone();
 	let dark_oracle_updater = DarkOracleUpdater::new(dark_oracle_client.clone(), update_interval)?;
 
 	let (update_tx, update_rx) = mpsc::channel::<UpdateTx>(200);
@@ -100,11 +83,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 	let fetch_storage = storage.clone();
 	let fetch_currencies = supported_currencies.clone();
-	let fetch_update_tx = update_tx.clone();
 	let fetch_trigger_clone = fetch_trigger.clone();
 	let coingecko_config = args.coingecko.clone();
 	let fastforex_config = args.fastforex.clone();
 	let brl_bps_adjustment = args.brl_bps_adjustment;
+	let fetch_hierarchy = hierarchy.clone();
 
 	tokio::spawn(async move {
 		info!("Starting fetch loop");
@@ -115,27 +98,24 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			update_interval,
 			fetch_trigger_clone,
 			price_api,
-			hermes_client,
-			fetch_update_tx,
+			fetch_hierarchy,
 		)
 		.await;
 	});
 
 	let feed_storage = storage.clone();
 	let feed_currencies = supported_currencies.clone();
+	let feed_hierarchy = hierarchy;
 
 	tokio::spawn(async move {
 		info!("Starting feed loop");
 		let _ = price_updater::run_feed_loop(
 			feed_storage,
 			feed_currencies,
-			price_divergence_threshold_bp,
 			dark_oracle_updater,
-			divergence_tx,
 			update_tx,
-			pyth_updater,
-			pyth_client,
 			fetch_trigger,
+			feed_hierarchy,
 		)
 		.await;
 	});

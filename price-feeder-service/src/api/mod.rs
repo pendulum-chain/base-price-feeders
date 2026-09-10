@@ -6,6 +6,7 @@ use crate::api::fastforex::FastForexPriceApi;
 use crate::args::{CoingeckoConfig, FastForexConfig};
 use crate::types::{Aggregator, Quotation};
 use crate::AssetSpecifier;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -23,11 +24,12 @@ pub struct QuotationsOutcome {
 }
 
 pub type QuotationsFuture<'a> = Pin<Box<dyn Future<Output = QuotationsOutcome> + Send + 'a>>;
+pub type AssetsByProvider<'a> = HashMap<Aggregator, Vec<&'a AssetSpecifier>>;
 
 pub trait PriceApi {
 	fn get_quotation_futures<'a>(
 		&'a self,
-		assets: Vec<&'a AssetSpecifier>,
+		assets_by_provider: AssetsByProvider<'a>,
 	) -> Vec<QuotationsFuture<'a>>;
 }
 
@@ -56,34 +58,40 @@ impl PriceApiImpl {
 impl PriceApi for PriceApiImpl {
 	fn get_quotation_futures<'a>(
 		&'a self,
-		assets: Vec<&'a AssetSpecifier>,
+		mut assets_by_provider: AssetsByProvider<'a>,
 	) -> Vec<QuotationsFuture<'a>> {
-		let binance_assets: Vec<&AssetSpecifier> = assets
-			.iter()
-			.copied()
+		let binance_assets: Vec<&AssetSpecifier> = assets_by_provider
+			.remove(&Aggregator::Binance)
+			.unwrap_or_default()
+			.into_iter()
 			.filter(|asset| BinancePriceApi::is_supported(asset))
 			.collect();
 
-		let coinbase_assets: Vec<&AssetSpecifier> = assets
-			.iter()
-			.copied()
+		let coinbase_assets: Vec<&AssetSpecifier> = assets_by_provider
+			.remove(&Aggregator::Coinbase)
+			.unwrap_or_default()
+			.into_iter()
 			.filter(|asset| CoinbasePriceApi::is_supported(asset))
 			.collect();
 
-		let coingecko_assets: Vec<&AssetSpecifier> = assets
-			.iter()
-			.copied()
+		let coingecko_assets: Vec<&AssetSpecifier> = assets_by_provider
+			.remove(&Aggregator::Coingecko)
+			.unwrap_or_default()
+			.into_iter()
 			.filter(|asset| CoingeckoPriceApi::is_supported(asset))
 			.collect();
 
-		let fastforex_assets: Vec<&AssetSpecifier> = assets
-			.iter()
-			.copied()
+		let fastforex_assets: Vec<&AssetSpecifier> = assets_by_provider
+			.remove(&Aggregator::FastForex)
+			.unwrap_or_default()
+			.into_iter()
 			.filter(|asset| FastForexPriceApi::is_supported(asset))
 			.collect();
 
-		vec![
-			Box::pin(async move {
+		let mut futures: Vec<QuotationsFuture<'a>> = Vec::new();
+
+		if !binance_assets.is_empty() {
+			futures.push(Box::pin(async move {
 				match self.get_binance_quotations(binance_assets).await {
 					Ok(quotations) => QuotationsOutcome {
 						provider: Aggregator::Binance,
@@ -99,8 +107,11 @@ impl PriceApi for PriceApiImpl {
 						}
 					},
 				}
-			}),
-			Box::pin(async move {
+			}));
+		}
+
+		if !coinbase_assets.is_empty() {
+			futures.push(Box::pin(async move {
 				match self.get_coinbase_quotations(coinbase_assets).await {
 					Ok(quotations) => QuotationsOutcome {
 						provider: Aggregator::Coinbase,
@@ -116,8 +127,11 @@ impl PriceApi for PriceApiImpl {
 						}
 					},
 				}
-			}),
-			Box::pin(async move {
+			}));
+		}
+
+		if !coingecko_assets.is_empty() {
+			futures.push(Box::pin(async move {
 				match self.get_coingecko_quotations(coingecko_assets).await {
 					Ok(quotations) => QuotationsOutcome {
 						provider: Aggregator::Coingecko,
@@ -133,8 +147,11 @@ impl PriceApi for PriceApiImpl {
 						}
 					},
 				}
-			}),
-			Box::pin(async move {
+			}));
+		}
+
+		if !fastforex_assets.is_empty() {
+			futures.push(Box::pin(async move {
 				match self.get_fastforex_quotations(fastforex_assets).await {
 					Ok(quotations) => QuotationsOutcome {
 						provider: Aggregator::FastForex,
@@ -150,8 +167,10 @@ impl PriceApi for PriceApiImpl {
 						}
 					},
 				}
-			}),
-		]
+			}));
+		}
+
+		futures
 	}
 }
 
@@ -186,5 +205,35 @@ impl PriceApiImpl {
 	) -> Result<Vec<Quotation>, FastForexError> {
 		let quotations = self.fastforex_price_api.get_prices(assets).await?;
 		Ok(quotations)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn api() -> PriceApiImpl {
+		PriceApiImpl::new(
+			CoingeckoConfig {
+				cg_api_key: String::new(),
+				cg_host_url: "https://example.invalid".into(),
+			},
+			FastForexConfig {
+				ff_api_key: String::new(),
+				ff_host_url: "https://example.invalid".into(),
+			},
+			0,
+		)
+	}
+
+	#[test]
+	fn builds_requests_only_for_providers_selected_by_the_hierarchy() {
+		let api = api();
+		let eurc = AssetSpecifier { blockchain: "Base".into(), symbol: "EURC".into() };
+		let assets_by_provider = HashMap::from([(Aggregator::FastForex, vec![&eurc])]);
+
+		let futures = api.get_quotation_futures(assets_by_provider);
+
+		assert_eq!(futures.len(), 1);
 	}
 }

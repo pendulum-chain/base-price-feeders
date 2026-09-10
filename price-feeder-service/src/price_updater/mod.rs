@@ -1,15 +1,17 @@
+// Retained for a possible future reference-price alert, but not started by the service.
+#[allow(dead_code)]
 pub mod alerts;
 pub mod chain;
 pub mod configs;
 pub mod dark_oracle;
 pub mod helpers;
+// Retained for compatibility and tests, but deliberately not wired into either runtime loop.
+#[allow(dead_code)]
 pub mod pyth;
 pub mod tx_processor;
 
-pub use alerts::PriceDivergenceAlert;
 pub use chain::ChainClient;
 pub use dark_oracle::DarkOracleUpdater;
-pub use pyth::{HermesClient, PythPriceUpdater};
 pub use tx_processor::UpdateTx;
 
 use crate::api::PriceApi;
@@ -19,7 +21,7 @@ use crate::AssetSpecifier;
 use alloy::primitives::B256;
 use configs::HierarchyEntry;
 use futures::stream::{FuturesUnordered, StreamExt};
-use helpers::{convert_to_coin_info, BIPS_DIVISOR};
+use helpers::convert_to_coin_info;
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::error::Error;
@@ -223,10 +225,7 @@ async fn handle_asset_exhausted(
 	let asset_symbol = asset.symbol.as_str();
 	// Look up the most recent (but stale) price across the hierarchy.
 	let last_price = asset_hierarchy.into_iter().find_map(|entry| {
-		let aggregator = &entry.aggregator;
-		let blockchain =
-			if *aggregator == Aggregator::Pyth { "unknown" } else { asset.blockchain.as_str() };
-		storage.get_timeframe_any(asset_symbol, blockchain, aggregator.clone())
+		storage.get_timeframe_any(asset_symbol, &asset.blockchain, entry.aggregator.clone())
 	});
 
 	let should_send_disable = {
@@ -323,38 +322,33 @@ async fn handle_asset_exhausted(
 //       via `fetch_trigger` (the normal case, scheduled
 ///      to fire `FETCH_LEAD_TIME` before each feed tick), or
 ///
-/// On a successful fetch (no provider errored) it goes back to sleep. On
-/// **any** provider error it retries immediately without waiting for the
-/// next trigger, until either the fetch succeeds or a new trigger arrives.
+/// Each trigger starts at most one request per provider required by the active
+/// hierarchy. Provider failures are retried on the next scheduled trigger, so
+/// one failing provider cannot amplify traffic to healthy providers.
 pub async fn run_fetch_loop<T>(
 	storage: Arc<CoinInfoStorage>,
 	supported_currencies: HashSet<AssetSpecifier>,
 	update_interval: std::time::Duration,
 	fetch_trigger: Arc<Notify>,
 	api: T,
-	hermes: HermesClient,
-	_update_tx: mpsc::Sender<UpdateTx>,
+	hierarchy: ProviderHierarchy,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>>
 where
 	T: PriceApi + Send + Sync + 'static,
 {
-	let _ = run_single_fetch(&storage, &supported_currencies, update_interval, &api, &hermes).await;
+	let mut had_error =
+		run_single_fetch(&storage, &supported_currencies, update_interval, &api, &hierarchy).await;
+	if had_error {
+		warn!("Fetch loop encountered a provider error; waiting for the next scheduled fetch");
+	}
 
 	loop {
 		fetch_trigger.notified().await;
-
-		// Run fetches; on any provider error, retry immediately without
-		// waiting for the next trigger.
-		loop {
-			let had_error =
-				run_single_fetch(&storage, &supported_currencies, update_interval, &api, &hermes)
-					.await;
-			if !had_error {
-				break;
-			}
-			warn!("Fetch loop encountered a provider error; retrying immediately");
-			//  avoid pegging a CPU on a hard-down provider.
-			tokio::task::yield_now().await;
+		had_error =
+			run_single_fetch(&storage, &supported_currencies, update_interval, &api, &hierarchy)
+				.await;
+		if had_error {
+			warn!("Fetch loop encountered a provider error; waiting for the next scheduled fetch");
 		}
 	}
 }
@@ -364,19 +358,19 @@ async fn run_single_fetch<T>(
 	supported_currencies: &HashSet<AssetSpecifier>,
 	update_interval: std::time::Duration,
 	api: &T,
-	hermes: &HermesClient,
+	hierarchy: &ProviderHierarchy,
 ) -> bool
 where
 	T: PriceApi + Send + Sync + 'static,
 {
 	let start = tokio::time::Instant::now();
 
-	let assets_refs: Vec<&AssetSpecifier> = supported_currencies.iter().collect();
-	let storage_pyth = storage.clone();
+	let assets_by_provider =
+		hierarchy.get_assets_by_provider(supported_currencies, chrono::Utc::now());
 
 	let quotations_future = async {
 		let mut futures = FuturesUnordered::new();
-		for future in api.get_quotation_futures(assets_refs) {
+		for future in api.get_quotation_futures(assets_by_provider) {
 			futures.push(future);
 		}
 
@@ -399,46 +393,7 @@ where
 		had_error
 	};
 
-	// Fetch Pyth prices. Purely for storage update as coinbase/coingecko final backups.
-	let pyth_future = async {
-		match hermes.fetch_pyth_prices(supported_currencies).await {
-			Ok((_data, price_data)) => {
-				let time = chrono::Utc::now().timestamp_millis() as u64;
-
-				let update_pyth = |symbol: &str, price: f64| {
-					let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
-					storage_pyth.update_timeframe(CoinInfo {
-						symbol: symbol.into(),
-						name: symbol.into(),
-						blockchain: "unknown".into(),
-						supply: 0,
-						last_update_timestamp: time,
-						price: (price * scale) as u128,
-						provider: Aggregator::Pyth,
-					});
-				};
-
-				for (symbol, price) in &price_data.prices {
-					update_pyth(symbol, *price);
-				}
-				false
-			},
-			// Auth failures are not retryable until the API key is fixed; reporting them as
-			// errors here would make the fetch loop hammer Hermes with doomed requests.
-			Err(e) if e.is_auth() => {
-				debug!("Skipping Pyth prices in fetch loop: {}", e);
-				false
-			},
-			Err(e) => {
-				error!("Failed to fetch Pyth prices in fetch loop: {:?}", e);
-				true
-			},
-		}
-	};
-
-	let quotations_timeout = tokio::time::timeout(update_interval, quotations_future);
-	let (quotations_err, pyth_err) = tokio::join!(quotations_timeout, pyth_future);
-	let quotations_err = match quotations_err {
+	let had_error = match tokio::time::timeout(update_interval, quotations_future).await {
 		Ok(had_error) => had_error,
 		Err(_) => {
 			error!(
@@ -448,7 +403,6 @@ where
 			true
 		},
 	};
-	let had_error = quotations_err || pyth_err;
 	debug!("run_single_fetch completed in {:?} (had_error: {})", start.elapsed(), had_error);
 
 	had_error
@@ -457,20 +411,16 @@ where
 pub async fn run_feed_loop(
 	storage: Arc<CoinInfoStorage>,
 	supported_currencies: HashSet<AssetSpecifier>,
-	divergence_threshold_bp: u64,
 	dark_oracle_updater: DarkOracleUpdater,
-	divergence_tx: mpsc::Sender<PriceDivergenceAlert>,
 	update_tx: mpsc::Sender<UpdateTx>,
-	mut pyth_updater: PythPriceUpdater,
-	pyth_client: Arc<ChainClient>,
 	fetch_trigger: Arc<Notify>,
+	hierarchy: ProviderHierarchy,
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 	info!("Starting feed loop");
 
 	let disabled_assets =
 		Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, AssetStatus>::new()));
 	let startup_reconciled_assets = Arc::new(tokio::sync::Mutex::new(HashSet::<String>::new()));
-	let hierarchy = ProviderHierarchy::default();
 	let update_interval = dark_oracle_updater.get_update_interval();
 
 	loop {
@@ -481,28 +431,6 @@ pub async fn run_feed_loop(
 		// Schedule the fetch trigger to fire just before the *next* feed
 		// tick.
 		schedule_fetch_trigger(fetch_trigger.clone(), next_tick, FETCH_LEAD_TIME);
-
-		let pyth_future = async {
-			match pyth_updater.run_update(pyth_client.clone(), &supported_currencies).await {
-				Ok((tx_hash_opt, price_data)) => {
-					if let Some(tx_hash) = tx_hash_opt {
-						send_tx(&update_tx, TxKind::Pyth, tx_hash);
-					}
-				},
-				Err(e) => {
-					let is_auth = e
-						.downcast_ref::<pyth::PythFetchError>()
-						.is_some_and(|pyth_err| pyth_err.is_auth());
-					if is_auth {
-						// The 401 itself is logged where it happens; per-tick repeats
-						// during the backoff window would only flood the logs.
-						debug!("Skipping Pyth on-chain update: {}", e);
-					} else {
-						error!("Failed to fetch/submit Pyth prices: {:?}", e);
-					}
-				},
-			}
-		};
 
 		let mut currencies_to_feed = vec![];
 		let mut missing_data = false;
@@ -515,12 +443,11 @@ pub async fn run_feed_loop(
 			let mut selected_tf = None;
 			for entry in &asset_hierarchy {
 				let aggregator = &entry.aggregator;
-				let blockchain = if *aggregator == Aggregator::Pyth {
-					"unknown"
-				} else {
-					asset.blockchain.as_str()
-				};
-				match storage.get_timeframe_status(&asset.symbol, blockchain, aggregator.clone()) {
+				match storage.get_timeframe_status(
+					&asset.symbol,
+					&asset.blockchain,
+					aggregator.clone(),
+				) {
 					TimeframeStatus::Fresh(tf) => {
 						selected_tf = Some(tf);
 						break;
@@ -587,50 +514,8 @@ pub async fn run_feed_loop(
 				info!("Pushing prices to DarkOracle on-chain from providers: {}", provider_summary);
 
 				match dark_oracle_updater.update_prices(&currencies_to_feed).await {
-					Ok((tx_hash, price_data)) => {
+					Ok((tx_hash, _price_data)) => {
 						send_tx(&update_tx, TxKind::DarkOracle, tx_hash);
-
-						// Price divergence validation for EURC
-						let pyth_eurc_tf =
-							storage.get_timeframe("EURC", "unknown", Aggregator::Pyth);
-						if let Some(pyth_tf) = pyth_eurc_tf {
-							if let Some(&price) = price_data.prices.get("EURC") {
-								let scale = 1_000_000_000_000_000_000f64; // 10^18 for price
-								let fallback = (pyth_tf.price as f64) / scale;
-								let abs_div = if fallback > price {
-									fallback - price
-								} else {
-									price - fallback
-								};
-								let bp_div = (abs_div * BIPS_DIVISOR as f64) / fallback;
-								debug!(
-									"EURC divergence: {:.2} bp (DarkOracle: {}, Pyth: {})",
-									bp_div, price, fallback
-								);
-
-								if bp_div > divergence_threshold_bp as f64 {
-									let alert = PriceDivergenceAlert {
-										asset: "EURC".to_string(),
-										bp_divergence: bp_div,
-										threshold_bp: divergence_threshold_bp,
-										dark_oracle_price: price,
-										pyth_price: fallback,
-									};
-									if let Err(e) = divergence_tx.try_send(alert) {
-										match e {
-											mpsc::error::TrySendError::Full(_) => {
-												warn!(
-													"Divergence alert channel full — alert dropped"
-												);
-											},
-											mpsc::error::TrySendError::Closed(_) => {
-												error!("Divergence alert channel closed");
-											},
-										}
-									}
-								}
-							}
-						}
 					},
 					Err(e) => {
 						error!("Failed to submit DarkOracle tx: {:?}", e);
@@ -639,7 +524,7 @@ pub async fn run_feed_loop(
 			}
 		};
 
-		tokio::join!(pyth_future, dark_oracle_future);
+		dark_oracle_future.await;
 		let elapsed = feed_start.elapsed();
 		debug!("Feed loop tick completed in {:?}", elapsed);
 		if elapsed < update_interval {
@@ -681,10 +566,8 @@ fn send_tx(tx: &mpsc::Sender<Tx>, kind: TxKind, tx_hash: B256) {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{
-		api::QuotationsFuture, args::PythConfig,
-		price_updater::pyth::test_support::spawn_mock_hermes,
-	};
+	use crate::api::{AssetsByProvider, QuotationsFuture, QuotationsOutcome};
+	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	#[test]
 	fn startup_recovery_only_registers_when_asset_is_unregistered() {
@@ -692,14 +575,20 @@ mod tests {
 		assert!(!should_recover_asset_on_startup(true));
 	}
 
-	struct NoopPriceApi;
+	struct AlwaysFailPriceApi {
+		calls: Arc<AtomicUsize>,
+	}
 
-	impl PriceApi for NoopPriceApi {
+	impl PriceApi for AlwaysFailPriceApi {
 		fn get_quotation_futures<'a>(
 			&'a self,
-			_assets: Vec<&'a AssetSpecifier>,
+			assets_by_provider: AssetsByProvider<'a>,
 		) -> Vec<QuotationsFuture<'a>> {
-			vec![]
+			self.calls.fetch_add(1, Ordering::SeqCst);
+			let provider = assets_by_provider.keys().next().cloned().unwrap_or(Aggregator::Unknown);
+			vec![Box::pin(async move {
+				QuotationsOutcome { provider, quotations: Vec::new(), had_error: true }
+			})]
 		}
 	}
 
@@ -709,40 +598,25 @@ mod tests {
 			.collect()
 	}
 
-	fn hermes_client(url: String) -> HermesClient {
-		HermesClient::new(&PythConfig { pyth_api_key: None, hermes_url: url })
-	}
-
-	// Regression test for the Hermes 401 request storm: an auth failure must not be reported as
-	// a retryable provider error, otherwise `run_fetch_loop` hot-retries it until the next
-	// trigger.
 	#[tokio::test]
-	async fn fetch_loop_does_not_hot_retry_hermes_auth_failures() {
-		let (url, _handle) = spawn_mock_hermes("HTTP/1.1 401 Unauthorized", "{}", 1).await;
-		let hermes = hermes_client(url);
+	async fn fetch_loop_waits_for_next_trigger_after_provider_error() {
+		let calls = Arc::new(AtomicUsize::new(0));
+		let api = AlwaysFailPriceApi { calls: calls.clone() };
 		let interval = std::time::Duration::from_secs(1);
-		let storage = Arc::new(CoinInfoStorage::new(interval));
-		let currencies = eurc_currencies();
+		let result = tokio::time::timeout(
+			std::time::Duration::from_millis(20),
+			run_fetch_loop(
+				Arc::new(CoinInfoStorage::new(interval)),
+				eurc_currencies(),
+				interval,
+				Arc::new(Notify::new()),
+				api,
+				ProviderHierarchy::default(),
+			),
+		)
+		.await;
 
-		let had_error =
-			run_single_fetch(&storage, &currencies, interval, &NoopPriceApi, &hermes).await;
-		assert!(!had_error, "a 401 from Hermes must not trigger an immediate retry");
-
-		// While the auth backoff is active the fetch loop must stay quiet as well.
-		let had_error =
-			run_single_fetch(&storage, &currencies, interval, &NoopPriceApi, &hermes).await;
-		assert!(!had_error, "auth backoff must not trigger an immediate retry");
-	}
-
-	#[tokio::test]
-	async fn fetch_loop_still_retries_non_auth_hermes_errors() {
-		let (url, _handle) = spawn_mock_hermes("HTTP/1.1 500 Internal Server Error", "{}", 1).await;
-		let hermes = hermes_client(url);
-		let interval = std::time::Duration::from_secs(1);
-		let storage = Arc::new(CoinInfoStorage::new(interval));
-
-		let had_error =
-			run_single_fetch(&storage, &eurc_currencies(), interval, &NoopPriceApi, &hermes).await;
-		assert!(had_error, "a transient Hermes error must still be retryable");
+		assert!(result.is_err(), "the loop should be waiting for its next trigger");
+		assert_eq!(calls.load(Ordering::SeqCst), 1, "a provider error must not hot-retry");
 	}
 }
