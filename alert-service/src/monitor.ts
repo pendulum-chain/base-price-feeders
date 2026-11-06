@@ -1,4 +1,5 @@
 import { formatEther } from 'viem';
+import { findDarkOracleHistory } from './darkOracleHistory';
 import { config } from './config';
 import { sendSlackAlert } from './slack';
 import { publicClient, DARK_ORACLE_ABI, PYTH_ADAPTER_ABI, PYTH_CONTRACT_ABI } from './contracts';
@@ -34,8 +35,6 @@ export async function checkAccountBalance() {
 
 export async function checkStaleness() {
   try {
-    const currentBlock = await withTimeout(publicClient.getBlockNumber());
-
     let darkOracleMaxAgeMs = await withTimeout(publicClient.readContract({
       address: config.DARK_ORACLE_ADDRESS,
       abi: DARK_ORACLE_ABI,
@@ -44,23 +43,23 @@ export async function checkStaleness() {
 
     const maxAgeMs = darkOracleMaxAgeMs;
 
-    const stalenessThresholdMs = (maxAgeMs * BigInt(config.SAFETY_MARGIN * 100)) / BigInt(100);
+    const stalenessThresholdMs = (maxAgeMs * BigInt(Math.round(config.SAFETY_MARGIN * 100))) / BigInt(100);
 
-    // Use a fixed number of blocks instead of inferring based on block time
-    const fromBlock = currentBlock - BigInt(8);
-
-    const logs = await withTimeout(publicClient.getLogs({
-      address: config.DARK_ORACLE_ADDRESS,
-      event: DARK_ORACLE_ABI[1],
-      fromBlock,
-      toBlock: currentBlock
-    }));
+    const { logs, searchWindowMs, headTimestampMs } = await findDarkOracleHistory({
+      getBlock: (blockNumber) => withTimeout(publicClient.getBlock({ blockNumber })),
+      getLogs: (fromBlock, toBlock) => withTimeout(publicClient.getLogs({
+        address: config.DARK_ORACLE_ADDRESS,
+        event: DARK_ORACLE_ABI[1],
+        fromBlock,
+        toBlock,
+      })),
+    }, Number(stalenessThresholdMs));
 
     // Logs are returned from oldest to newest, reverse to get the most recent first
     let logsDescending = logs.reverse();
 
     if (logs.length === 0) {
-      await sendSlackAlert(`🚨 DarkOracle Staleness Alert: No PricesUpdated events emitted by DarkOracle (${config.DARK_ORACLE_ADDRESS}) in the last ${8} blocks.`);
+      await sendSlackAlert(`🚨 DarkOracle Staleness Alert: No PricesUpdated events emitted by DarkOracle (${config.DARK_ORACLE_ADDRESS}) in a history window covering at least ${searchWindowMs}ms.`);
     } else {
       let eventTimestampMs = 0;
 
@@ -78,8 +77,9 @@ export async function checkStaleness() {
       if (eventTimestampMs === 0) {
         await sendSlackAlert(`🚨 DarkOracle Staleness Alert: No valid timestamp found in the last ${logs.length} PricesUpdated events from DarkOracle (${config.DARK_ORACLE_ADDRESS}).`);
       } else {
-        const currentTimestampMs = Math.floor(Date.now());
-        const ageMs = (currentTimestampMs - eventTimestampMs);
+        // Measure against the scanned head, as the contract does with block.timestamp,
+        // so RPC lag and scan time cannot inflate the age.
+        const ageMs = headTimestampMs - eventTimestampMs;
 
         if (BigInt(ageMs) > stalenessThresholdMs) {
           await sendSlackAlert(
