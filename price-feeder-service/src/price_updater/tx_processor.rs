@@ -230,6 +230,9 @@ where
 	let mut last_error = None;
 	let poll = async {
 		loop {
+			// Wait before each lookup: a lookup right after sending always misses, so this saves a
+			// call per tx without confirming any later.
+			tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 			match provider.get_transaction_receipt(tx_hash).await {
 				Ok(Some(receipt)) => return receipt,
 				Ok(None) => last_error = None,
@@ -241,7 +244,6 @@ where
 					last_error = Some(e);
 				},
 			}
-			tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 		}
 	};
 	// Alerts are sent after the deadline so it cannot cancel them.
@@ -336,7 +338,8 @@ mod tests {
 		)
 		.await;
 		let provider = Arc::new(ProviderBuilder::new().on_http(url.parse().unwrap()));
-		let deadline = std::time::Duration::from_millis(300);
+		// Room for exactly one lookup, which happens after 2s.
+		let deadline = std::time::Duration::from_millis(2500);
 		let outcome = tokio::time::timeout(
 			std::time::Duration::from_secs(10),
 			confirm_tx(provider, UpdateTxKind::DarkOracle, B256::ZERO, deadline),
