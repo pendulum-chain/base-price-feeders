@@ -31,6 +31,8 @@ pub async fn send_slack_alert(message: String) {
 			.header("Authorization", format!("Bearer {}", token))
 			.header("Content-Type", "application/json; charset=utf-8")
 			.json(&body)
+			// A hung Slack request must not stall the confirmation or disable paths awaiting it.
+			.timeout(std::time::Duration::from_secs(10))
 			.send()
 			.await;
 

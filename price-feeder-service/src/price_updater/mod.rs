@@ -160,10 +160,10 @@ async fn reconcile_asset_registration_on_startup(
 					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
 				);
 			},
-			outcome @ (ConfirmOutcome::RpcError | ConfirmOutcome::NoReceipt) => {
+			ConfirmOutcome::NoReceipt => {
 				warn!(
-					"Could not confirm startup enable tx for {} ({:?}, attempt {}/{})",
-					asset_symbol, outcome, attempt, STARTUP_ENABLE_MAX_RETRIES
+					"No receipt for startup enable tx of {} (attempt {}/{})",
+					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
 				);
 			},
 		}
@@ -303,11 +303,8 @@ async fn handle_asset_exhausted(
 					warn!("Disable tx for {} reverted on-chain, resubmitting", asset_symbol);
 					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
 				},
-				outcome @ (ConfirmOutcome::RpcError | ConfirmOutcome::NoReceipt) => {
-					warn!(
-						"Could not confirm disable tx for {} ({:?}), resubmitting",
-						asset_symbol, outcome
-					);
+				ConfirmOutcome::NoReceipt => {
+					warn!("No receipt for disable tx of {}, resubmitting", asset_symbol);
 					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
 				},
 			}
