@@ -16,6 +16,9 @@ use crate::price_updater::chain::PriorityFeeMultiplier;
 
 const MAX_TRACKED_TXS: usize = 100;
 const RESYNC_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long `confirm_tx` waits for a receipt. A replaced or dropped tx never gets one, so without
+/// a limit its poller would run for the life of the process.
+pub const CONFIRM_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy)]
 pub enum UpdateTxKind {
@@ -42,6 +45,8 @@ pub enum ConfirmOutcome {
 	Confirmed,
 	Reverted,
 	RpcError,
+	/// No receipt within the deadline: the tx may still be pending, or was replaced or dropped.
+	NoReceipt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,7 +147,7 @@ pub async fn run_tx_processor(
 				let provider = Arc::clone(&provider);
 				let tracked = Arc::clone(&tracked);
 				tokio::spawn(async move {
-					let outcome = confirm_tx(provider, kind, tx_hash).await;
+					let outcome = confirm_tx(provider, kind, tx_hash, CONFIRM_DEADLINE).await;
 					let mut tracked = tracked.lock().await;
 					if let Some(entry) = tracked.iter_mut().find(|t| t.tx_hash == tx_hash) {
 						match outcome {
@@ -157,6 +162,9 @@ pub async fn run_tx_processor(
 							ConfirmOutcome::RpcError => {
 								error!("[Watchdog] RPC error confirming tx: {:?}", tx_hash);
 							},
+							// Leave the state alone; the watchdog already handles unconfirmed
+							// txs.
+							ConfirmOutcome::NoReceipt => {},
 						}
 					}
 				});
@@ -207,36 +215,48 @@ pub async fn run_tx_processor(
 	}
 }
 
-/// Polls for a transaction receipt until it is mined, reverts, or the RPC errors.
-/// Slack alerts are emitted for revert / RPC failure cases.
-pub async fn confirm_tx<P, T>(provider: Arc<P>, kind: UpdateTxKind, tx_hash: B256) -> ConfirmOutcome
+/// Polls for a transaction receipt until it is mined, reverts, the RPC errors, or `deadline`
+/// passes. The deadline also bounds hung RPC requests. Slack alerts are emitted for revert / RPC
+/// failure cases.
+pub async fn confirm_tx<P, T>(
+	provider: Arc<P>,
+	kind: UpdateTxKind,
+	tx_hash: B256,
+	deadline: std::time::Duration,
+) -> ConfirmOutcome
 where
 	P: Provider<T> + ?Sized,
 	T: Transport + Clone,
 {
-	loop {
-		match provider.get_transaction_receipt(tx_hash).await {
-			Ok(Some(receipt)) => {
-				if receipt.status() {
-					info!(
-						"[{}] transaction confirmed: tx_hash={:?}, block={:?}",
-						kind, receipt.transaction_hash, receipt.block_number,
-					);
-					return ConfirmOutcome::Confirmed;
-				} else {
-					on_tx_reverted(kind, &receipt).await;
-					return ConfirmOutcome::Reverted;
-				}
-			},
-			Ok(None) => {
-				tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-			},
-			Err(e) => {
-				on_tx_error(kind, Box::new(e)).await;
-				return ConfirmOutcome::RpcError;
-			},
+	let poll = async {
+		loop {
+			match provider.get_transaction_receipt(tx_hash).await {
+				Ok(Some(receipt)) => {
+					if receipt.status() {
+						info!(
+							"[{}] transaction confirmed: tx_hash={:?}, block={:?}",
+							kind, receipt.transaction_hash, receipt.block_number,
+						);
+						return ConfirmOutcome::Confirmed;
+					} else {
+						on_tx_reverted(kind, &receipt).await;
+						return ConfirmOutcome::Reverted;
+					}
+				},
+				Ok(None) => {
+					tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+				},
+				Err(e) => {
+					on_tx_error(kind, Box::new(e)).await;
+					return ConfirmOutcome::RpcError;
+				},
+			}
 		}
-	}
+	};
+	tokio::time::timeout(deadline, poll).await.unwrap_or_else(|_| {
+		warn!("[{}] no receipt after {:?}, giving up: tx_hash={:?}", kind, deadline, tx_hash);
+		ConfirmOutcome::NoReceipt
+	})
 }
 
 async fn on_tx_reverted(kind: UpdateTxKind, receipt: &TransactionReceipt) {
@@ -292,6 +312,49 @@ mod tests {
 			make_tx(TxState::Unconfirmed, std::time::Duration::from_secs(15)),
 		];
 		assert!(check_watchdog_timeout(&tracked, TIMEOUT).is_some());
+	}
+
+	/// Answers every JSON-RPC call with `null`, as a node does for the receipt of a tx that was
+	/// replaced or dropped.
+	async fn null_rpc_server() -> Url {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}", listener.local_addr().unwrap()).parse().unwrap();
+		tokio::spawn(async move {
+			loop {
+				let (mut socket, _) = listener.accept().await.unwrap();
+				let mut buf = vec![0u8; 8192];
+				let n = socket.read(&mut buf).await.unwrap();
+				let request = String::from_utf8_lossy(&buf[..n]);
+				let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+				let id = serde_json::from_str::<serde_json::Value>(body)
+					.map(|v| v["id"].clone())
+					.unwrap_or_default();
+				let reply = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": null });
+				let reply = reply.to_string();
+				let response = format!(
+					"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+					reply.len(),
+					reply
+				);
+				socket.write_all(response.as_bytes()).await.unwrap();
+			}
+		});
+		url
+	}
+
+	#[tokio::test]
+	async fn confirm_tx_gives_up_on_a_tx_that_never_gets_a_receipt() {
+		let provider = Arc::new(ProviderBuilder::new().on_http(null_rpc_server().await));
+		let deadline = std::time::Duration::from_millis(300);
+		let outcome = tokio::time::timeout(
+			std::time::Duration::from_secs(10),
+			confirm_tx(provider, UpdateTxKind::DarkOracle, B256::ZERO, deadline),
+		)
+		.await
+		.expect("confirm_tx kept polling past its deadline");
+		assert!(matches!(outcome, ConfirmOutcome::NoReceipt));
 	}
 
 	#[test]

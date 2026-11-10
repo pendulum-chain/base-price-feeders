@@ -141,7 +141,14 @@ async fn reconcile_asset_registration_on_startup(
 		};
 
 		let provider = dark_oracle_updater.provider();
-		match tx_processor::confirm_tx(provider, TxKind::EnableAsset, tx_hash).await {
+		match tx_processor::confirm_tx(
+			provider,
+			TxKind::EnableAsset,
+			tx_hash,
+			tx_processor::CONFIRM_DEADLINE,
+		)
+		.await
+		{
 			ConfirmOutcome::Confirmed => {
 				startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
 				info!("Successfully enabled {} during startup reconciliation", asset_symbol);
@@ -153,10 +160,10 @@ async fn reconcile_asset_registration_on_startup(
 					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
 				);
 			},
-			ConfirmOutcome::RpcError => {
+			outcome @ (ConfirmOutcome::RpcError | ConfirmOutcome::NoReceipt) => {
 				warn!(
-					"RPC error confirming startup enable tx for {} (attempt {}/{})",
-					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
+					"Could not confirm startup enable tx for {} ({:?}, attempt {}/{})",
+					asset_symbol, outcome, attempt, STARTUP_ENABLE_MAX_RETRIES
 				);
 			},
 		}
@@ -283,14 +290,24 @@ async fn handle_asset_exhausted(
 				},
 			};
 
-			match tx_processor::confirm_tx(provider.clone(), TxKind::DisableAsset, tx_hash).await {
+			match tx_processor::confirm_tx(
+				provider.clone(),
+				TxKind::DisableAsset,
+				tx_hash,
+				tx_processor::CONFIRM_DEADLINE,
+			)
+			.await
+			{
 				ConfirmOutcome::Confirmed => break meta,
 				ConfirmOutcome::Reverted => {
 					warn!("Disable tx for {} reverted on-chain, resubmitting", asset_symbol);
 					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
 				},
-				ConfirmOutcome::RpcError => {
-					warn!("RPC error confirming disable tx for {}, resubmitting", asset_symbol);
+				outcome @ (ConfirmOutcome::RpcError | ConfirmOutcome::NoReceipt) => {
+					warn!(
+						"Could not confirm disable tx for {} ({:?}), resubmitting",
+						asset_symbol, outcome
+					);
 					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
 				},
 			}
