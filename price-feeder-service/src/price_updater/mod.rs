@@ -121,7 +121,13 @@ async fn reconcile_asset_registration_on_startup(
 
 	for attempt in 1..=STARTUP_ENABLE_MAX_RETRIES {
 		let tx_hash = match dark_oracle_updater.enable_asset(asset_symbol, &meta).await {
-			Ok(tx_hash) => tx_hash,
+			Ok(Some(tx_hash)) => tx_hash,
+			// An earlier attempt landed after we stopped waiting for its receipt.
+			Ok(None) => {
+				startup_reconciled_assets.lock().await.insert(asset_symbol.to_string());
+				info!("{} is registered, startup reconciliation done", asset_symbol);
+				return;
+			},
 			Err(e) => {
 				error!(
 					"Failed to enable {} during startup reconciliation (attempt {}/{}): {:?}",
@@ -165,6 +171,8 @@ async fn reconcile_asset_registration_on_startup(
 					"No receipt for startup enable tx of {} (attempt {}/{})",
 					asset_symbol, attempt, STARTUP_ENABLE_MAX_RETRIES
 				);
+				// If the tx was dropped, the retry must reuse its nonce.
+				dark_oracle_updater.resync_nonce().await;
 			},
 		}
 
@@ -278,40 +286,64 @@ async fn handle_asset_exhausted(
 	if should_send_disable {
 		info!("Hierarchy exhausted for {}, sending disable tx", asset_symbol);
 
-		// Block the feed loop until the disable tx is confirmed on-chain!!
+		// Block the feed loop until the asset is unregistered on-chain. `disable_asset` checks the
+		// chain before sending, so a disable tx that lands after we stopped waiting for its receipt
+		// ends the loop instead of making every resend revert.
 		let provider = dark_oracle_updater.provider();
-		let meta = loop {
-			let (tx_hash, meta) = match dark_oracle_updater.disable_asset(asset_symbol).await {
-				Ok(ok) => ok,
+		let mut meta = None;
+		loop {
+			match dark_oracle_updater.disable_asset(asset_symbol).await {
+				Ok(Some((tx_hash, on_chain_meta))) => {
+					meta = Some(on_chain_meta);
+					match tx_processor::confirm_tx(
+						provider.clone(),
+						TxKind::DisableAsset,
+						tx_hash,
+						tx_processor::CONFIRM_DEADLINE,
+					)
+					.await
+					{
+						ConfirmOutcome::Confirmed => break,
+						ConfirmOutcome::Reverted => {
+							warn!(
+								"Disable tx for {} reverted on-chain, resubmitting",
+								asset_symbol
+							);
+						},
+						ConfirmOutcome::NoReceipt => {
+							warn!("No receipt for disable tx of {}, resubmitting", asset_symbol);
+							// If the tx was dropped, the resend must reuse its nonce.
+							dark_oracle_updater.resync_nonce().await;
+						},
+					}
+				},
+				Ok(None) => break,
 				Err(e) => {
 					error!("Failed to submit disable tx for {}: {:?}, retrying", asset_symbol, e);
-					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
-					continue;
-				},
-			};
-
-			match tx_processor::confirm_tx(
-				provider.clone(),
-				TxKind::DisableAsset,
-				tx_hash,
-				tx_processor::CONFIRM_DEADLINE,
-			)
-			.await
-			{
-				ConfirmOutcome::Confirmed => break meta,
-				ConfirmOutcome::Reverted => {
-					warn!("Disable tx for {} reverted on-chain, resubmitting", asset_symbol);
-					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
-				},
-				ConfirmOutcome::NoReceipt => {
-					warn!("No receipt for disable tx of {}, resubmitting", asset_symbol);
-					tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
 				},
 			}
-		};
+			tokio::time::sleep(DISABLE_RETRY_BACKOFF).await;
+		}
 
 		let mut disabled_guard = disabled_assets.lock().await;
-		disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Disabled(meta));
+		// Metadata to re-register the asset with once its feed recovers. Without an on-chain read
+		// (the asset was already unregistered, e.g. after a restart or a failed enable) fall back
+		// to what the failed enable used, then to the configured metadata.
+		let meta = meta
+			.or_else(|| match disabled_guard.get(asset_symbol) {
+				Some(AssetStatus::Enabling(meta)) => Some(meta.clone()),
+				_ => None,
+			})
+			.or_else(|| configs::get_configured_registration_metadata(asset_symbol));
+		match meta {
+			Some(meta) => {
+				disabled_guard.insert(asset_symbol.to_string(), AssetStatus::Disabled(meta));
+			},
+			None => error!(
+				"{} is unregistered and its registration metadata is unknown, so it cannot be re-enabled; set ASSET_REGISTRATION_METADATA",
+				asset_symbol
+			),
+		}
 		if let Some(last_tf) = last_price {
 			currencies_to_feed.push(last_tf);
 		} else {

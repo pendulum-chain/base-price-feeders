@@ -76,15 +76,26 @@ impl DarkOracleUpdater {
 		})
 	}
 
+	/// Forces the nonce to the chain's pending nonce, e.g. after a tx got no receipt.
+	pub async fn resync_nonce(&self) {
+		self.client.nonce_manager.resync().await;
+	}
+
+	/// Sends an `unregisterAsset` tx and returns it with the asset's on-chain metadata. Returns
+	/// `None` without sending when the asset is not registered, since that tx could only revert.
 	pub async fn disable_asset(
 		&self,
 		symbol: &str,
-	) -> Result<(B256, AssetMetadata), Box<dyn Error + Send + Sync + 'static>> {
-		info!("Disabling DarkOracle contract asset {}...", symbol);
+	) -> Result<Option<(B256, AssetMetadata)>, Box<dyn Error + Send + Sync + 'static>> {
 		let asset_addr = configs::get_asset_address(symbol)
 			.ok_or_else(|| format!("Asset address not found for symbol: {}", symbol))?;
 
 		let meta = self.fetch_asset_meta(asset_addr).await?;
+		if meta.asset_address != asset_addr {
+			info!("DarkOracle asset {} is not registered, nothing to disable", symbol);
+			return Ok(None);
+		}
+		info!("Disabling DarkOracle contract asset {}...", symbol);
 
 		let priority_fee = self.client.estimate_priority_fee().await?;
 		let call_builder = self
@@ -97,7 +108,7 @@ impl DarkOracleUpdater {
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
 			.await?;
-		Ok((tx_hash, meta))
+		Ok(Some((tx_hash, meta)))
 	}
 
 	pub async fn is_asset_registered(
@@ -110,11 +121,17 @@ impl DarkOracleUpdater {
 		Ok(meta.asset_address == asset_addr)
 	}
 
+	/// Sends a `registerAsset` tx. Returns `None` without sending when the asset is already
+	/// registered, since that tx could only revert.
 	pub async fn enable_asset(
 		&self,
 		symbol: &str,
 		meta: &AssetMetadata,
-	) -> Result<B256, Box<dyn Error + Send + Sync + 'static>> {
+	) -> Result<Option<B256>, Box<dyn Error + Send + Sync + 'static>> {
+		if self.is_asset_registered(symbol).await? {
+			info!("DarkOracle asset {} is already registered, nothing to enable", symbol);
+			return Ok(None);
+		}
 		info!("Enabling DarkOracle contract asset {}...", symbol);
 
 		let priority_fee = self.client.estimate_priority_fee().await?;
@@ -134,7 +151,7 @@ impl DarkOracleUpdater {
 			.client
 			.send_tx_with_retry(call_builder.into_transaction_request(), self.update_interval)
 			.await?;
-		Ok(tx_hash)
+		Ok(Some(tx_hash))
 	}
 
 	pub async fn update_prices(
@@ -202,5 +219,68 @@ impl DarkOracleUpdater {
 		let price_data = PriceData { prices: prices_map };
 
 		Ok((tx_hash, price_data))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::price_updater::{
+		chain::{NonceManager, PriorityFeeMultiplier},
+		pyth::test_support::spawn_mock_hermes,
+	};
+	use alloy::{
+		network::EthereumWallet, providers::ProviderBuilder, signers::local::PrivateKeySigner,
+		sol_types::SolCall,
+	};
+
+	/// An updater whose RPC answers a single request: an `assetMeta` read returning `meta`. Any
+	/// further request, such as a fee estimate before sending, fails.
+	async fn updater_reading(meta: (String, String, B256, Address, u8)) -> DarkOracleUpdater {
+		let result = DarkOracle::assetMetaCall::abi_encode_returns(&meta);
+		let body = format!(r#"{{"jsonrpc":"2.0","id":0,"result":"0x{}"}}"#, hex::encode(result));
+		let (url, _) =
+			spawn_mock_hermes("HTTP/1.1 200 OK", Box::leak(body.into_boxed_str()), 1).await;
+		let signer = PrivateKeySigner::random();
+		let address = signer.address();
+		let provider = ProviderBuilder::new()
+			.with_recommended_fillers()
+			.wallet(EthereumWallet::from(signer))
+			.on_http(url.parse().unwrap());
+		let client = Arc::new(ChainClient {
+			provider: Arc::new(provider),
+			nonce_manager: Arc::new(NonceManager::new(0, address, url)),
+			address,
+			priority_multiplier: Arc::new(PriorityFeeMultiplier::new(7.0)),
+		});
+		let oracle = DarkOracle::new(Address::ZERO, (*client.provider).clone());
+		DarkOracleUpdater {
+			oracle: Arc::new(oracle),
+			client,
+			update_interval: std::time::Duration::from_secs(10),
+		}
+	}
+
+	#[tokio::test]
+	async fn disable_sends_nothing_when_the_asset_is_already_unregistered() {
+		let unregistered = (String::new(), String::new(), B256::ZERO, Address::ZERO, 0);
+		let updater = updater_reading(unregistered).await;
+		assert!(updater.disable_asset("BRL").await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn enable_sends_nothing_when_the_asset_is_already_registered() {
+		let brl = configs::get_asset_address("BRL").unwrap();
+		let registered =
+			("BRLAUSD".to_string(), "BRLAUSD".to_string(), B256::repeat_byte(1), brl, 3);
+		let meta = AssetMetadata {
+			name: registered.0.clone(),
+			canonical_name: registered.1.clone(),
+			price_feed_id: registered.2,
+			asset_address: brl,
+			id: 3,
+		};
+		let updater = updater_reading(registered).await;
+		assert!(updater.enable_asset("BRL", &meta).await.unwrap().is_none());
 	}
 }
