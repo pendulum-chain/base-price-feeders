@@ -156,6 +156,20 @@ impl NonceManager {
 		&self.rpc_url
 	}
 
+	/// Forces the local nonce to the chain's pending nonce, so a nonce left unused by a dropped tx
+	/// is reused instead of leaving every later tx queued behind it.
+	pub async fn resync(&self) {
+		match self.get_onchain_nonce().await {
+			Ok(onchain_nonce) => {
+				info!("[Resync] Forcing nonce to onchain value: {}", onchain_nonce);
+				self.force_sync_nonce(onchain_nonce);
+			},
+			Err(e) => {
+				error!("[Resync] Failed to fetch onchain nonce: {:?}", e);
+			},
+		}
+	}
+
 	pub fn spawn_resync_handler(self: &Arc<Self>) -> mpsc::Sender<()> {
 		let (tx, mut rx) = mpsc::channel::<()>(10);
 		let mgr = Arc::clone(self);
@@ -164,15 +178,7 @@ impl NonceManager {
 			info!("Starting nonce resync handler");
 			while rx.recv().await.is_some() {
 				warn!("[Resync] Received resync signal from watchdog");
-				match mgr.get_onchain_nonce().await {
-					Ok(onchain_nonce) => {
-						info!("[Resync] Forcing nonce to onchain value: {}", onchain_nonce);
-						mgr.force_sync_nonce(onchain_nonce);
-					},
-					Err(e) => {
-						error!("[Resync] Failed to fetch onchain nonce: {:?}", e);
-					},
-				}
+				mgr.resync().await;
 			}
 		});
 
