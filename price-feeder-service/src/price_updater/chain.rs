@@ -1,6 +1,8 @@
+use alloy::eips::eip2718::Encodable2718;
 use alloy::primitives::{Address, B256};
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
+use alloy::transports::TransportErrorKind;
 use alloy::{
 	network::{Ethereum, EthereumWallet},
 	providers::{
@@ -295,9 +297,23 @@ impl ChainClient {
 
 			tx_req.nonce = Some(nonce);
 
-			match alloy::providers::Provider::send_transaction(&*self.provider, tx_req.clone())
+			// Fill and sign here, then send the raw bytes. `Provider::send_transaction` would also
+			// start alloy's block-polling heartbeat, which we never use: on Base's 200 ms blocks it
+			// falls behind its 10-block cache and re-fetches an ever-growing block range nonstop.
+			let sent = async {
+				let filled = self.provider.fill(tx_req.clone()).await?;
+				let signed = filled.as_envelope().ok_or_else(|| {
+					TransportErrorKind::custom_str(
+						"transaction is missing fields and was not signed",
+					)
+				})?;
+				alloy::providers::Provider::send_raw_transaction(
+					&*self.provider,
+					&signed.encoded_2718(),
+				)
 				.await
-			{
+			};
+			match sent.await {
 				Ok(pending_tx) => return Ok(*pending_tx.tx_hash()),
 				Err(e) => {
 					retries += 1;
@@ -338,9 +354,48 @@ pub struct PriceData {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::price_updater::pyth::test_support::spawn_mock_hermes;
+	use alloy::{primitives::TxKind, rpc::types::TransactionRequest};
 
 	const BASE: f32 = 7.0;
 	const EPS: f32 = 1e-4;
+
+	#[tokio::test]
+	async fn sending_does_not_start_a_block_poller() {
+		// The stub answers two requests: the send, and the first block-number poll a heartbeat
+		// would make right after it.
+		let body = format!(r#"{{"jsonrpc":"2.0","id":0,"result":"{}"}}"#, B256::repeat_byte(0x11));
+		let (url, requests) =
+			spawn_mock_hermes("HTTP/1.1 200 OK", Box::leak(body.into_boxed_str()), 2).await;
+		let signer = PrivateKeySigner::random();
+		let address = signer.address();
+		let provider = ProviderBuilder::new()
+			.with_recommended_fillers()
+			.wallet(EthereumWallet::from(signer))
+			.on_http(url.parse().unwrap());
+		let client = ChainClient {
+			provider: Arc::new(provider),
+			nonce_manager: Arc::new(NonceManager::new(0, address, url)),
+			address,
+			priority_multiplier: Arc::new(PriorityFeeMultiplier::new(BASE)),
+		};
+		// With every field set the fillers need no RPC, so the send is the only request.
+		let tx = TransactionRequest {
+			to: Some(TxKind::Call(Address::ZERO)),
+			gas: Some(21_000),
+			max_fee_per_gas: Some(1),
+			max_priority_fee_per_gas: Some(1),
+			chain_id: Some(8453),
+			..Default::default()
+		};
+
+		let tx_hash =
+			client.send_tx_with_retry(tx, std::time::Duration::from_secs(10)).await.unwrap();
+
+		assert_eq!(tx_hash, B256::repeat_byte(0x11));
+		tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+		assert!(!requests.is_finished(), "something polled the RPC after the send");
+	}
 
 	fn approx_eq(a: f32, b: f32) -> bool {
 		(a - b).abs() < EPS
